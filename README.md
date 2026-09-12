@@ -8,6 +8,23 @@ assignment automatically from the date - there is nothing to select. Checking an
 item off writes a permanent dated record, so the history and trend views answer
 "am I actually being consistent" rather than just "what is today".
 
+## Live app
+
+https://hifdh-seedsacademy.vercel.app - add it to the iPhone home screen with
+Share -> Add to Home Screen.
+
+## One-time setup
+
+Supabase will only send a magic link back to a URL it has been told to trust.
+In the Supabase dashboard for the `hifdh-tracker` project, under
+**Authentication -> URL Configuration**, set:
+
+- **Site URL**: `https://hifdh-seedsacademy.vercel.app`
+- **Redirect URLs**: add `https://hifdh-seedsacademy.vercel.app/**`
+
+Until that is set, the sign-in email arrives but its link bounces to
+`localhost:3000`. Nothing else needs configuring.
+
 ## Storage
 
 Data lives in **Postgres (Supabase)**, not in the browser. Clearing site data,
