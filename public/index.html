@@ -2,11 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>Hifdh</title>
-<meta name="description" content="Daily Quran revision and Arabic study tracker">
+<meta name="description" content="Your daily Qur'an revision, worked out for you">
 <link rel="manifest" href="manifest.webmanifest">
-<meta name="theme-color" content="#0f1512">
+<meta name="theme-color" content="#faf9f6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Hifdh">
@@ -18,144 +19,261 @@
 
 <div id="boot" class="boot"><div class="spinner"></div></div>
 
-<!-- ---------- Auth ---------- -->
+<!-- ══════════ Sign in ══════════ -->
 <section id="auth" class="auth" hidden>
-  <div class="auth-card">
+  <div class="auth-inner">
+    <div class="auth-mark" aria-hidden="true"></div>
     <h1 class="auth-title">Hifdh</h1>
-    <p class="auth-sub">Daily Quran revision &amp; Arabic tracker</p>
-    <form id="auth-form">
-      <label class="lbl" for="email">Email</label>
+    <p class="auth-sub">Your revision, worked out for you.</p>
+    <form id="auth-form" class="auth-form">
       <input id="email" type="email" inputmode="email" autocomplete="email"
-             placeholder="you@example.com" required>
-      <button id="auth-btn" class="btn btn-primary" type="submit">Send me a sign-in link</button>
+             placeholder="Email address" required aria-label="Email address">
+      <button id="auth-btn" class="btn btn-primary" type="submit">Continue</button>
     </form>
     <p id="auth-msg" class="auth-msg" hidden></p>
-    <p class="auth-note">You stay signed in on this device. Sign in on another
-      device with the same email to see the same data.</p>
   </div>
 </section>
 
-<!-- ---------- App ---------- -->
+<!-- ══════════ First run ══════════ -->
+<section id="setup" class="setup" hidden>
+  <div class="setup-inner">
+    <p class="eyebrow">Set up</p>
+    <h1 class="display">What do you<br>have memorized?</h1>
+    <p class="lede">Everything else is calculated from this. You can change it whenever your pool grows.</p>
+
+    <div class="card">
+      <div class="field">
+        <label class="field-label" for="su-from">From</label>
+        <select id="su-from" class="select"></select>
+      </div>
+      <div class="hr"></div>
+      <div class="field">
+        <label class="field-label" for="su-to">To</label>
+        <select id="su-to" class="select"></select>
+      </div>
+    </div>
+    <p id="setup-summary" class="note"></p>
+
+    <div class="card">
+      <div class="field-block">
+        <span class="field-label">Lesson days</span>
+        <p class="field-hint">When you present a new page to your teacher.</p>
+        <div id="su-days" class="daypick"></div>
+      </div>
+    </div>
+
+    <button id="setup-go" class="btn btn-primary btn-lg">Build my plan</button>
+  </div>
+</section>
+
+<!-- ══════════ App ══════════ -->
 <main id="app" hidden>
 
-  <!-- Today -->
+  <!-- ───── Today ───── -->
   <section id="view-today" class="view">
-    <header class="hdr">
-      <p class="hdr-kicker" id="today-weekday"></p>
-      <h1 class="hdr-title" id="today-date"></h1>
+    <header class="nav">
+      <p class="nav-eyebrow" id="t-eyebrow"></p>
+      <h1 class="nav-title" id="t-greeting">Today</h1>
     </header>
-    <div id="today-tasks" class="tasks"></div>
-    <div class="streak-row">
-      <div class="stat">
-        <span class="stat-num" id="stat-streak">-</span>
-        <span class="stat-lbl">day streak</span>
+
+    <article id="inspire" class="inspire">
+      <div class="inspire-glow" aria-hidden="true"></div>
+      <p class="inspire-body" id="insp-body"></p>
+      <p class="inspire-src" id="insp-src"></p>
+      <p class="inspire-note" id="insp-note"></p>
+    </article>
+
+    <div class="ring-row">
+      <div class="ring-wrap">
+        <svg class="ring" viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="ring-bg" cx="60" cy="60" r="52"/>
+          <circle class="ring-fg" id="ring-fg" cx="60" cy="60" r="52"/>
+        </svg>
+        <div class="ring-mid">
+          <span class="ring-num" id="ring-num">0</span>
+          <span class="ring-lbl" id="ring-lbl">pages left</span>
+        </div>
       </div>
-      <div class="stat">
-        <span class="stat-num" id="stat-30">-</span>
-        <span class="stat-lbl">of last 30 complete</span>
+      <div class="ring-side">
+        <div class="mini"><span class="mini-n" id="m-streak">0</span><span class="mini-l">day streak</span></div>
+        <div class="mini"><span class="mini-n" id="m-known">0</span><span class="mini-l">pages held</span></div>
+        <div class="mini"><span class="mini-n" id="m-cycle">—</span><span class="mini-l">day cycle</span></div>
       </div>
     </div>
+
+    <div id="tasks" class="tasks"></div>
+    <p id="today-empty" class="empty" hidden></p>
   </section>
 
-  <!-- Week editor -->
-  <section id="view-week" class="view" hidden>
-    <header class="hdr"><h1 class="hdr-title">Weekly plan</h1>
-      <p class="hdr-note">Redraw this when your memorization pool grows.</p></header>
-    <div id="week-list" class="week-list"></div>
-  </section>
+  <!-- ───── Plan ───── -->
+  <section id="view-plan" class="view" hidden>
+    <header class="nav"><h1 class="nav-title">Plan</h1></header>
 
-  <!-- History -->
-  <section id="view-history" class="view" hidden>
-    <header class="hdr"><h1 class="hdr-title">History</h1></header>
-    <div id="heatmap" class="heatmap"></div>
-    <div class="legend">
-      <span class="legend-lbl">None</span>
-      <span class="cell lv0"></span><span class="cell lv1"></span>
-      <span class="cell lv2"></span><span class="cell lv3"></span>
-      <span class="legend-lbl">All 3</span>
+    <div class="summary" id="plan-summary"></div>
+
+    <p class="group-label">Memorized</p>
+    <div class="card">
+      <div class="field">
+        <label class="field-label" for="p-from">From</label>
+        <select id="p-from" class="select"></select>
+      </div>
+      <div class="hr"></div>
+      <div class="field">
+        <label class="field-label" for="p-to">To</label>
+        <select id="p-to" class="select"></select>
+      </div>
+      <div class="hr"></div>
+      <div class="field-block">
+        <span class="field-label">New pages go</span>
+        <p class="field-hint">Backwards means each new page sits before what you already hold.</p>
+        <div class="seg seg-wide" id="p-direction">
+          <button type="button" data-v="backward">Backwards</button>
+          <button type="button" data-v="forward">Forwards</button>
+        </div>
+      </div>
     </div>
-    <div id="history-summary" class="history-summary"></div>
+
+    <p class="group-label">Lessons</p>
+    <div class="card">
+      <div class="field-block">
+        <span class="field-label">Lesson days</span>
+        <div id="p-days" class="daypick"></div>
+      </div>
+      <div class="hr"></div>
+      <div class="field">
+        <span class="field-label">Pages per lesson</span>
+        <div class="stepper" data-key="new_pages_per_lesson">
+          <button type="button" data-d="-1" aria-label="Fewer">−</button>
+          <span class="stepper-v" id="v-new_pages_per_lesson">1</span>
+          <button type="button" data-d="1" aria-label="More">+</button>
+        </div>
+      </div>
+    </div>
+
+    <p class="group-label">Daily revision</p>
+    <div class="card">
+      <div class="field">
+        <span class="field-label">Manzil a day</span>
+        <div class="stepper" data-key="manzil_pages_per_day">
+          <button type="button" data-d="-1" aria-label="Fewer">−</button>
+          <span class="stepper-v" id="v-manzil_pages_per_day">8</span>
+          <button type="button" data-d="1" aria-label="More">+</button>
+        </div>
+      </div>
+      <div class="hr"></div>
+      <div class="field">
+        <span class="field-label">Sabqi a day</span>
+        <div class="stepper" data-key="sabqi_pages_per_day">
+          <button type="button" data-d="-1" aria-label="Fewer">−</button>
+          <span class="stepper-v" id="v-sabqi_pages_per_day">5</span>
+          <button type="button" data-d="1" aria-label="More">+</button>
+        </div>
+      </div>
+      <div class="hr"></div>
+      <div class="field">
+        <span class="field-label">Sabqi window</span>
+        <div class="stepper" data-key="sabqi_window_pages">
+          <button type="button" data-d="-1" aria-label="Fewer">−</button>
+          <span class="stepper-v" id="v-sabqi_window_pages">10</span>
+          <button type="button" data-d="1" aria-label="More">+</button>
+        </div>
+      </div>
+      <div class="hr"></div>
+      <div class="field-block">
+        <span class="field-label">Rest days</span>
+        <p class="field-hint">No revision scheduled. Lessons still count.</p>
+        <div id="p-rest" class="daypick"></div>
+      </div>
+    </div>
+
+    <p class="group-label">Next seven days</p>
+    <div id="preview" class="preview"></div>
+    <p class="note">A preview only — nothing is saved to your history until the day arrives.</p>
   </section>
 
-  <!-- Weekly review -->
-  <section id="view-review" class="view" hidden>
-    <header class="hdr"><h1 class="hdr-title">Weekly review</h1></header>
+  <!-- ───── Progress ───── -->
+  <section id="view-progress" class="view" hidden>
+    <header class="nav"><h1 class="nav-title">Progress</h1></header>
 
-    <figure class="chart-figure">
-      <figcaption class="chart-title">Pages recited with zero hesitation</figcaption>
+    <div class="stat-row">
+      <div class="stat"><span class="stat-n" id="s-done">0</span><span class="stat-l">complete days</span></div>
+      <div class="stat"><span class="stat-n" id="s-rate">0%</span><span class="stat-l">last 8 weeks</span></div>
+    </div>
+
+    <p class="group-label">Consistency</p>
+    <div class="card card-pad">
+      <div id="heatmap" class="heatmap"></div>
+      <div class="legend">
+        <span>Less</span><i class="cell l0"></i><i class="cell l1"></i><i class="cell l2"></i><i class="cell l3"></i><span>More</span>
+      </div>
+    </div>
+
+    <p class="group-label">Retention</p>
+    <div class="card card-pad">
+      <p class="chart-cap">Pages recited with zero hesitation</p>
       <div id="chart" class="chart"></div>
-      <p id="chart-empty" class="chart-empty">Log two or more reviews to see the trend.</p>
-    </figure>
+      <p id="chart-empty" class="empty-sm">Log two weekly reviews to see the trend.</p>
+    </div>
 
-    <form id="review-form" class="form-card">
-      <label class="lbl" for="rv-date">Week ending</label>
-      <input id="rv-date" type="date" required>
-
-      <label class="lbl" for="rv-zero">Zero-hesitation pages <span class="hint">e.g. 42/48</span></label>
-      <input id="rv-zero" type="text" inputmode="text" placeholder="42/48">
-
-      <label class="lbl" for="rv-weak">Weak pages <span class="hint">needed a peek</span></label>
-      <input id="rv-weak" type="text" placeholder="6, mostly An-Najm">
-
-      <label class="lbl" for="rv-arabic">Arabic pages completed</label>
-      <input id="rv-arabic" type="number" inputmode="numeric" min="0">
-
-      <label class="lbl" for="rv-vocab">Vocab roots logged</label>
-      <input id="rv-vocab" type="number" inputmode="numeric" min="0">
-
-      <label class="lbl" for="rv-note">Note</label>
-      <textarea id="rv-note" rows="3" placeholder="Did this feel easier than a month ago?"></textarea>
-
+    <p class="group-label">This week</p>
+    <form id="review-form" class="card">
+      <div class="field"><label class="field-label" for="rv-date">Week ending</label>
+        <input id="rv-date" type="date" class="inp" required></div>
+      <div class="hr"></div>
+      <div class="field"><label class="field-label" for="rv-zero">Zero hesitation</label>
+        <input id="rv-zero" type="text" class="inp" placeholder="42/48"></div>
+      <div class="hr"></div>
+      <div class="field"><label class="field-label" for="rv-weak">Weak pages</label>
+        <input id="rv-weak" type="text" class="inp" placeholder="6"></div>
+      <div class="hr"></div>
+      <div class="field"><label class="field-label" for="rv-arabic">Arabic pages</label>
+        <input id="rv-arabic" type="number" inputmode="numeric" min="0" class="inp"></div>
+      <div class="hr"></div>
+      <div class="field"><label class="field-label" for="rv-vocab">Vocab roots</label>
+        <input id="rv-vocab" type="number" inputmode="numeric" min="0" class="inp"></div>
+      <div class="hr"></div>
+      <div class="field-block"><label class="field-label" for="rv-note">Note</label>
+        <textarea id="rv-note" rows="2" class="inp" placeholder="Did this feel easier than a month ago?"></textarea></div>
       <button class="btn btn-primary" type="submit">Save review</button>
-      <p id="rv-msg" class="form-msg" hidden></p>
     </form>
-
     <div id="review-list" class="review-list"></div>
   </section>
 
-  <!-- Settings -->
-  <section id="view-settings" class="view" hidden>
-    <header class="hdr"><h1 class="hdr-title">Settings</h1></header>
-    <div class="form-card">
-      <label class="lbl" for="set-remind">Daily reminder</label>
-      <input id="set-remind" type="time">
-      <p class="hint hint-block" id="remind-status"></p>
-      <button id="remind-save" class="btn" type="button">Save reminder</button>
+  <!-- ───── More ───── -->
+  <section id="view-more" class="view" hidden>
+    <header class="nav"><h1 class="nav-title">More</h1></header>
+
+    <p class="group-label">Reminder</p>
+    <div class="card">
+      <div class="field">
+        <label class="field-label" for="set-remind">Daily nudge</label>
+        <input id="set-remind" type="time" class="inp inp-time">
+      </div>
+      <div class="hr"></div>
+      <div class="field-block">
+        <p class="field-hint" id="remind-status"></p>
+        <button id="remind-save" class="btn" type="button">Save reminder</button>
+      </div>
     </div>
-    <div class="form-card">
-      <p class="hint hint-block">Signed in as <strong id="set-email"></strong></p>
-      <button id="signout" class="btn btn-quiet" type="button">Sign out</button>
+
+    <p class="group-label">Account</p>
+    <div class="card">
+      <div class="field"><span class="field-label">Signed in</span>
+        <span class="field-value" id="set-email"></span></div>
+      <div class="hr"></div>
+      <div class="field-block">
+        <button id="signout" class="btn btn-quiet" type="button">Sign out</button>
+      </div>
     </div>
+
+    <p class="note">Page numbers follow the standard 604-page Madani mushaf.</p>
   </section>
 
-  <!-- Tab bar -->
-  <nav class="tabs" id="tabs">
-    <button class="tab is-active" data-view="today"   type="button"><span class="tab-ico">&#10003;</span>Today</button>
-    <button class="tab" data-view="week"     type="button"><span class="tab-ico">&#9776;</span>Week</button>
-    <button class="tab" data-view="history"  type="button"><span class="tab-ico">&#9632;</span>History</button>
-    <button class="tab" data-view="review"   type="button"><span class="tab-ico">&#9650;</span>Review</button>
-    <button class="tab" data-view="settings" type="button"><span class="tab-ico">&#9881;</span>More</button>
-  </nav>
+  <!-- ───── Tab bar ───── -->
+  <nav class="tabbar" id="tabs"></nav>
 </main>
 
 <div id="toast" class="toast" hidden></div>
-
-<!-- Day editor sheet -->
-<div id="sheet" class="sheet" hidden>
-  <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
-    <h2 class="sheet-title" id="sheet-title"></h2>
-    <label class="lbl" for="ed-sabqi">Sabqi</label>
-    <textarea id="ed-sabqi" rows="2"></textarea>
-    <label class="lbl" for="ed-manzil">Manzil</label>
-    <textarea id="ed-manzil" rows="4"></textarea>
-    <label class="lbl" for="ed-arabic">Arabic</label>
-    <textarea id="ed-arabic" rows="2"></textarea>
-    <div class="sheet-actions">
-      <button id="ed-cancel" class="btn btn-quiet" type="button">Cancel</button>
-      <button id="ed-save" class="btn btn-primary" type="button">Save</button>
-    </div>
-  </div>
-</div>
 
 <script type="module" src="app.js"></script>
 </body>

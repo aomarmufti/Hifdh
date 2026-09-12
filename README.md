@@ -1,108 +1,154 @@
 # Hifdh
 
-A personal daily tracker for Quran memorization revision (Sabqi + Manzil) and
-Arabic study. Mobile-first, installable on an iPhone home screen as a PWA.
-
-Each weekday has a fixed revision assignment. The app shows **today's**
-assignment automatically from the date - there is nothing to select. Checking an
-item off writes a permanent dated record, so the history and trend views answer
-"am I actually being consistent" rather than just "what is today".
+A personal Qur'an revision tracker that **works out what to revise**, rather than
+asking you to. Mobile-first, installable on an iPhone home screen as a PWA.
 
 ## Live app
 
-https://hifdh-seedsacademy.vercel.app - add it to the iPhone home screen with
-Share -> Add to Home Screen.
+https://hifdh-seedsacademy.vercel.app — Share → Add to Home Screen.
 
 ## One-time setup
 
-Supabase will only send a magic link back to a URL it has been told to trust.
-In the Supabase dashboard for the `hifdh-tracker` project, under
-**Authentication -> URL Configuration**, set:
+Supabase only sends magic links back to URLs it trusts. In the Supabase
+dashboard for `hifdh-tracker` → **Authentication → URL Configuration**:
 
 - **Site URL**: `https://hifdh-seedsacademy.vercel.app`
 - **Redirect URLs**: add `https://hifdh-seedsacademy.vercel.app/**`
 
-Until that is set, the sign-in email arrives but its link bounces to
-`localhost:3000`. Nothing else needs configuring.
+Until that is set the email arrives but its link bounces to `localhost:3000`.
 
-## Storage
+## The idea
 
-Data lives in **Postgres (Supabase)**, not in the browser. Clearing site data,
-reinstalling the PWA, or signing in on a second device all keep the same
-history. `localStorage` is used only as an offline outbox: a check-off made with
-no signal is replayed when the connection returns.
+You tell it one thing — the range you have memorized. Everything else is
+derived. It splits your pages three ways, the classical division:
 
-Every table is protected by row-level security keyed to `auth.uid()`, so a row is
-readable and writable only by the account that owns it. This is verified in the
-test run below.
-
-### Tables
-
-| Table | Rows | Holds |
+| | what it is | when |
 |---|---|---|
-| `weekly_plan` | 7 per user | the Sabqi / Manzil / Arabic assignment for each weekday |
-| `daily_log` | 1 per date | which of the three were done, plus the time each was ticked |
-| `weekly_review` | 1 per week | zero-hesitation pages, weak pages, Arabic pages, vocab roots, note |
-| `settings` | 1 per user | reminder time |
+| **Sabaq** | the new page you present to your teacher | lesson days only |
+| **Sabqi** | your most recent pages, still being strengthened | every day, short cycle |
+| **Manzil** | everything older | every day, long rotation |
 
-A trigger on signup seeds `weekly_plan` with the starting rotation, so a new
-account opens onto a populated Today screen.
+Each day it hands you a specific page range with surah names. The manzil
+rotation walks the whole pool and starts again, so the Plan screen can tell you
+*"everything every 13 days"* — and that number moves when you move the dials.
 
-## Auth
+### Nothing is keyed to the calendar
 
-Email magic link - enter an email, tap the link, stay signed in. No password, no
-signup flow. Signing in with the same email on another device shows the same
-data.
+The schedule's memory is a pair of **cursors**, not a date. A cursor only
+advances when work is planned. Miss a day and the rotation resumes exactly where
+it stopped — it never skips to "where it should have been". Miss a week and you
+do not return to a week of backlog, because days you never opened generated
+nothing.
+
+### Unfinished work carries over
+
+A portion you did not get to moves to the next day, tagged with the day it came
+from, instead of disappearing.
+
+### Memorizing direction
+
+**Backwards** means each new page sits *before* the range you hold — the usual
+route for someone who began at Juz 30 and is working toward the front. Starting
+from Ad-Dukhan, the next new page is the end of Az-Zukhruf. **Forwards** extends
+past the end instead. One tap to switch.
+
+## The dials
+
+All on the Plan screen, all recalculating live, including today's portion if you
+have not already done it:
+
+- what you have memorized (from surah → to surah)
+- which days are lesson days, and pages per lesson
+- manzil pages a day — the main lever on cycle length
+- sabqi pages a day, and how many recent pages stay in the sabqi window
+- rest days
+
+A seven-day preview under the dials shows exactly what the change produces
+before it becomes history.
 
 ## Screens
 
-- **Today** - the three tasks for today with large checkboxes. Ticking is
-  optimistic: the UI updates immediately and the write happens behind it.
-- **Week** - tap any weekday to edit its three fields. Used when the
-  memorization pool grows and the rotation is redrawn.
-- **History** - an 8-week heatmap, one column per week, shaded by how many of
-  the three were completed. Tap a day to see its date and count.
-- **Review** - the weekly form, plus a line chart of zero-hesitation pages over
-  time. Tap the chart to inspect a point.
-- **More** - reminder time and sign out.
+1. **Today** — the daily message, a ring showing pages remaining, and the day's
+   portions. Ticking is optimistic: the UI moves first, the write follows.
+2. **Plan** — the dials above, the live cycle length, and the preview.
+3. **Progress** — an 8-week heatmap shaded by how much of each day you finished,
+   a retention chart, and the weekly review form.
+4. **More** — reminder time and account.
 
-## Reminders - what actually works
+## The daily message
 
-The reminder fires a local notification while the app is open or warm in the
-background. A true scheduled push to a closed app needs a push server with VAPID
-keys, which this does not have. The setting is saved before the permission
-prompt is shown, so dismissing that prompt never loses the time.
+A verse or a hadith with its source and a line of encouragement, drawn from a
+table of 32 (20 ayat, 12 ahadith). It is picked by date, so it is stable all day
+and rotates for over a month before anything repeats.
+
+## Storage
+
+Postgres via Supabase. Every table is row-level-security'd to `auth.uid()`, so a
+row is readable and writable only by the account that owns it. `localStorage`
+holds one thing: an offline outbox that replays a tick made with no signal.
+
+| Table | Holds |
+|---|---|
+| `plan_config` | the dials |
+| `progress` | memorized range + the two rotation cursors |
+| `daily_tasks` | every generated portion, done state, carry-over origin |
+| `weekly_review` | the weekly retention log |
+| `inspirations` | the shared daily messages (read-only) |
+| `settings` | reminder time |
+
+## Reminders — what actually works
+
+A local notification while the app is open or warm in the background. A true
+scheduled push to a closed app needs a push server with VAPID keys, which this
+does not have. The time is saved **before** the permission prompt appears, so
+dismissing that prompt never loses the setting.
+
+## Page numbers
+
+The standard 604-page Madani mushaf. `public/lib/quran.js` holds all 114 surahs
+with their starting pages; a surah's last page is where the next one begins,
+because surahs share pages. If your copy is paginated differently, that one
+table is the only thing to change.
+
+## Tests
+
+`npm test` runs both suites.
+
+**Engine (52 assertions, `test/engine.test.js`)** — pure functions, no browser.
+Pools and rotation, chunking and wrap-around, that a skipped day resumes rather
+than jumps, that the same state yields the same portion on any weekday, that a
+full rotation covers all 99 manzil pages exactly once and takes the 13 days the
+projection claims, that two lessons a week really produces two new pages a week
+walking backwards one page at a time, and that planning never mutates its input.
+
+**End-to-end (71 assertions, `test/test.cjs`)** — headless Chromium at iPhone
+viewport driving the real UI. The database lives in the Node test process, not
+the browser, so the persistence test clears **all** cookies and browser storage,
+reloads, and asserts everything returns — the actual cross-device guarantee.
+
+Covered: first-run setup, that today's portions are computed with the right page
+ranges and surah names, the daily message being stable across a reload,
+optimistic ticking, carry-over of unfinished work (and that finished work does
+*not* move), every planner dial changing the cycle and rebuilding today's
+portion, the surah pickers agreeing with the stored range, the heatmap and
+retention chart, reminder persistence with the permission prompt denied, dark
+mode, no horizontal overflow at 390px, tap targets, and zero console errors.
+
+Row-level security and the seed trigger were verified separately against the
+live database.
 
 ## Layout
 
 ```
-public/           the whole app - static files, no build step
-  index.html      markup for every screen
-  app.js          all behavior (ES module)
-  styles.css
-  config.js       Supabase URL + publishable key
-  sw.js           service worker, caches the shell only
-  manifest.webmanifest
-  icons/
-supabase/migrations/   schema and seed trigger as applied
+public/
+  index.html          markup for every screen
+  app.js              views, sync, optimistic ticking
+  lib/quran.js        the 114-surah page table + labelling
+  lib/engine.js       the scheduler — pure, no I/O, no dates
+  styles.css          design tokens, light + dark
+  sw.js  manifest.webmanifest  icons/
+supabase/migrations/  schema as applied
+test/                 engine suite + end-to-end harness
 ```
 
-No bundler and no dependencies. `public/` can be served by any static host.
-
-## Tests
-
-`npm test` runs 48 end-to-end assertions in headless Chromium at iPhone
-viewport size, driving the real UI. The database is held in the Node test
-process rather than the browser, so the persistence test clears **all** browser
-storage and cookies, reloads, and asserts the check-offs come back - which is
-the cross-device guarantee.
-
-Covered: the auth gate, today's tasks matching the weekday, apostrophe-safe
-rendering (`Al-Waqi'ah`, `Al-Jumu'ah`, `Al-Ma'arij`), optimistic check-off and
-its timestamp, persistence across a wiped cold start, the week editor, heatmap
-geometry, the review form and chart, upsert-in-place when a week is re-saved,
-reminder persistence, no horizontal overflow at 390px, tap targets >= 52px, and
-zero console errors across the run.
-
-Row-level security and the signup seed trigger are verified separately against
-the live database.
+No bundler, no build step, no runtime dependencies.

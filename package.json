@@ -1,10 +1,13 @@
 {
   "name": "hifdh",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Daily Quran revision and Arabic study tracker",
+  "type": "module",
+  "description": "Daily Qur'an revision, calculated from what you have memorized",
   "scripts": {
-    "test": "node test/run.js"
+    "test": "node test/engine.test.js && node test/run.cjs",
+    "test:engine": "node test/engine.test.js",
+    "test:e2e": "node test/run.cjs"
   },
   "devDependencies": {
     "playwright": "^1.49.1"

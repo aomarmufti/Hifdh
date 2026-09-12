@@ -1,394 +1,549 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.58.0/+esm';
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
+import { SURAHS, surahsInPages, pagesForSurahRange, labelForPages } from './lib/quran.js';
+import {
+  DEFAULT_CONFIG, planDay, absorbSabaq, cycleLengthDays,
+  sabqiWindow, manzilPool, preview
+} from './lib/engine.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
 });
 
-/* ------------------------------------------------------------------ *
- * Helpers
- * ------------------------------------------------------------------ */
-const $  = (id) => document.getElementById(id);
-const DAYS  = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-const SHORT = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-const TASKS = [
-  { key: 'sabqi',  label: 'Sabqi'  },
-  { key: 'manzil', label: 'Manzil' },
-  { key: 'arabic', label: 'Arabic' }
-];
+/* ══════════════════════ helpers ══════════════════════ */
+const $ = (id) => document.getElementById(id);
+const DAYS_LONG  = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+const DAYS_SHORT = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+const DAY_INITIAL = ['M','T','W','T','F','S','S'];
 
-// Local-time date key. Never use toISOString() here: it shifts to UTC and
-// would roll the day over for anyone east or west of Greenwich.
-function dateKey(d = new Date()) {
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-function parseKey(k) {
-  const [y, m, d] = k.split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
-// ISO weekday: 1 = Monday ... 7 = Sunday
-function isoDay(d = new Date()) { return d.getDay() === 0 ? 7 : d.getDay(); }
-function addDays(d, n) { const c = new Date(d); c.setDate(c.getDate() + n); return c; }
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
+const pad = (n) => String(n).padStart(2, '0');
+// Local date key. toISOString() would shift to UTC and roll the day over.
+const dateKey = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const parseKey = (k) => { const [y,m,d] = k.split('-').map(Number); return new Date(y, m-1, d); };
+const isoDay = (d = new Date()) => (d.getDay() === 0 ? 7 : d.getDay());
+const addDays = (d, n) => { const c = new Date(d); c.setDate(c.getDate()+n); return c; };
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
+  (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 
-let toastTimer;
-function toast(msg, isErr = false) {
+const ICONS = {
+  today:    'M3 9h18M7 3v3m10-3v3M5 21h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z',
+  plan:     'M4 6h16M4 12h16M4 18h10M18 16v5m2.5-2.5h-5',
+  progress: 'M3 20V10m6 10V4m6 16v-7m6 7V8',
+  more:     'M12 5h.01M12 12h.01M12 19h.01',
+  check:    'M20 6 9 17l-5-5'
+};
+const svg = (d, cls = '') =>
+  `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
+
+let toastT;
+function toast(msg, err = false) {
   const el = $('toast');
   el.textContent = msg;
-  el.classList.toggle('is-err', isErr);
+  el.classList.toggle('is-err', err);
   el.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 2600);
+  el.style.animation = 'none'; void el.offsetWidth; el.style.animation = '';
+  clearTimeout(toastT);
+  toastT = setTimeout(() => { el.hidden = true; }, 2400);
 }
+const buzz = (ms) => { if (navigator.vibrate) navigator.vibrate(ms); };
 
-/* ------------------------------------------------------------------ *
- * State
- * ------------------------------------------------------------------ */
+/* ══════════════════════ state ══════════════════════ */
 const state = {
   user: null,
-  plan: {},      // weekday(1-7) -> { sabqi, manzil, arabic }
-  logs: {},      // 'YYYY-MM-DD' -> log row
-  reviews: [],   // newest first
+  config: { ...DEFAULT_CONFIG },
+  progress: null,          // { memFrom, memTo, sabqiCursor, manzilCursor, lastPlanned }
+  tasks: [],               // today's tasks
+  history: {},             // dateKey -> { total, done }
+  reviews: [],
   settings: {},
+  inspirations: [],
   view: 'today'
 };
 
-/* ------------------------------------------------------------------ *
- * Write queue
- *
- * Postgres is the source of truth. This queue is only an outbox so a
- * check-off survives a dead tunnel on the walk to fajr; it is replayed
- * as soon as a write succeeds or the device comes back online.
- * ------------------------------------------------------------------ */
-const QKEY = 'hifdh.outbox.v1';
+/* ══════════════════════ offline outbox ══════════════════════ */
+// Postgres is the source of truth; this only survives a dead tunnel.
+const QKEY = 'hifdh.outbox.v2';
 let outbox = [];
 try { outbox = JSON.parse(localStorage.getItem(QKEY) || '[]'); } catch { outbox = []; }
 let flushing = false;
+const saveOutbox = () => { try { localStorage.setItem(QKEY, JSON.stringify(outbox)); } catch {} };
 
-function saveOutbox() {
-  try { localStorage.setItem(QKEY, JSON.stringify(outbox)); } catch { /* private mode */ }
-}
 function enqueue(op) {
-  // One pending write per target row; the newest payload wins.
   outbox = outbox.filter((o) => o.id !== op.id);
   outbox.push(op);
   saveOutbox();
   flush();
 }
-
 async function runOp(op) {
-  if (op.table === 'weekly_review') {
-    return sb.from('weekly_review').upsert(op.row, { onConflict: 'user_id,review_date' });
+  if (op.type === 'upsert') {
+    return sb.from(op.table).upsert(op.row, { onConflict: op.onConflict });
   }
-  if (op.table === 'weekly_plan') {
-    return sb.from('weekly_plan').upsert(op.row, { onConflict: 'user_id,weekday' });
+  if (op.type === 'update') {
+    return sb.from(op.table).update(op.row).eq('id', op.rowId);
   }
-  if (op.table === 'daily_log') {
-    return sb.from('daily_log').upsert(op.row, { onConflict: 'user_id,log_date' });
-  }
-  return sb.from('settings').upsert(op.row, { onConflict: 'user_id' });
+  return { error: null };
 }
-
 async function flush() {
   if (flushing || !outbox.length || !state.user) return;
   flushing = true;
   try {
     while (outbox.length) {
-      const op = outbox[0];
-      const { error } = await runOp(op);
-      if (error) {
-        console.warn('write failed, will retry', error);
-        toast('Saved on device, syncing later', true);
-        break;
-      }
-      outbox.shift();
-      saveOutbox();
+      const { error } = await runOp(outbox[0]);
+      if (error) { console.warn('write deferred', error); break; }
+      outbox.shift(); saveOutbox();
     }
-  } finally {
-    flushing = false;
-  }
+  } finally { flushing = false; }
 }
 window.addEventListener('online', flush);
 
-/* ------------------------------------------------------------------ *
- * Auth
- * ------------------------------------------------------------------ */
-$('auth-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const email = $('email').value.trim();
-  const btn = $('auth-btn');
-  const msg = $('auth-msg');
-  btn.disabled = true;
-  btn.textContent = 'Sending...';
-  const { error } = await sb.auth.signInWithOtp({
-    email,
-    options: { emailRedirectTo: window.location.origin + window.location.pathname }
-  });
-  btn.disabled = false;
-  btn.textContent = 'Send me a sign-in link';
-  msg.hidden = false;
-  msg.classList.toggle('is-err', !!error);
-  msg.textContent = error
-    ? error.message
-    : 'Check your email and tap the link. You can close this page.';
+/* ══════════════════════ config <-> db ══════════════════════ */
+const cfgFromRow = (r) => ({
+  direction: r.direction,
+  lessonDays: r.lesson_days || [],
+  newPagesPerLesson: r.new_pages_per_lesson,
+  sabqiWindowPages: r.sabqi_window_pages,
+  sabqiPagesPerDay: r.sabqi_pages_per_day,
+  manzilPagesPerDay: r.manzil_pages_per_day,
+  restDays: r.rest_days || []
 });
-
-$('signout').addEventListener('click', async () => {
-  await sb.auth.signOut();
-  location.reload();
+const cfgToRow = (c) => ({
+  user_id: state.user.id,
+  direction: c.direction,
+  lesson_days: c.lessonDays,
+  new_pages_per_lesson: c.newPagesPerLesson,
+  sabqi_window_pages: c.sabqiWindowPages,
+  sabqi_pages_per_day: c.sabqiPagesPerDay,
+  manzil_pages_per_day: c.manzilPagesPerDay,
+  rest_days: c.restDays,
+  updated_at: new Date().toISOString()
 });
+const progToRow = (p) => ({
+  user_id: state.user.id,
+  mem_from: p.memFrom, mem_to: p.memTo,
+  sabqi_cursor: p.sabqiCursor, manzil_cursor: p.manzilCursor,
+  last_planned_date: p.lastPlanned,
+  updated_at: new Date().toISOString()
+});
+function saveConfig() {
+  enqueue({ id: 'config', type: 'upsert', table: 'plan_config',
+            row: cfgToRow(state.config), onConflict: 'user_id' });
+}
+function saveProgress() {
+  enqueue({ id: 'progress', type: 'upsert', table: 'progress',
+            row: progToRow(state.progress), onConflict: 'user_id' });
+}
 
-/* ------------------------------------------------------------------ *
- * Data loading
- * ------------------------------------------------------------------ */
+/* ══════════════════════ load ══════════════════════ */
 async function loadAll() {
-  const since = dateKey(addDays(new Date(), -400));
-  const [plan, logs, reviews, settings] = await Promise.all([
-    sb.from('weekly_plan').select('*'),
-    sb.from('daily_log').select('*').gte('log_date', since),
+  const since = dateKey(addDays(new Date(), -70));
+  const [cfg, prog, tasks, reviews, settings, insp] = await Promise.all([
+    sb.from('plan_config').select('*').maybeSingle(),
+    sb.from('progress').select('*').maybeSingle(),
+    sb.from('daily_tasks').select('*').gte('task_date', since).order('task_date'),
     sb.from('weekly_review').select('*').order('review_date', { ascending: false }),
-    sb.from('settings').select('*').maybeSingle()
+    sb.from('settings').select('*').maybeSingle(),
+    sb.from('inspirations').select('*').order('id')
   ]);
 
-  if (plan.error) throw plan.error;
+  state.config = cfg.data ? cfgFromRow(cfg.data) : { ...DEFAULT_CONFIG };
+  state.progress = prog.data ? {
+    memFrom: prog.data.mem_from, memTo: prog.data.mem_to,
+    sabqiCursor: prog.data.sabqi_cursor, manzilCursor: prog.data.manzil_cursor,
+    lastPlanned: prog.data.last_planned_date
+  } : null;
 
-  state.plan = {};
-  for (const row of plan.data || []) state.plan[row.weekday] = row;
+  state.reviews = reviews.data || [];
+  state.settings = settings.data || {};
+  state.inspirations = insp.data || [];
 
-  // The signup trigger seeds the plan; this is the belt-and-braces path for
-  // an account that predates it or had rows removed.
-  if (!Object.keys(state.plan).length) {
-    for (let wd = 1; wd <= 7; wd++) {
-      state.plan[wd] = { weekday: wd, sabqi: '', manzil: '', arabic: '' };
+  const all = tasks.data || [];
+  state.tasks = all.filter((t) => t.task_date === dateKey());
+  state.history = {};
+  for (const t of all) {
+    const h = state.history[t.task_date] || (state.history[t.task_date] = { total: 0, done: 0 });
+    h.total++; if (t.done) h.done++;
+  }
+}
+
+/* ══════════════════════ the day ══════════════════════
+   Carry anything unfinished forward, then plan today once.
+   Days the app was never opened generate nothing, so a week away
+   does not return as a week of backlog.
+   ═══════════════════════════════════════════════════ */
+async function ensureDayPlanned() {
+  const today = dateKey();
+  if (!state.progress) return;
+
+  // 1. Carry unfinished work forward onto today.
+  const { data: stale } = await sb.from('daily_tasks').select('*')
+    .eq('done', false).lt('task_date', today);
+  if (stale && stale.length) {
+    for (const t of stale) {
+      await sb.from('daily_tasks')
+        .update({ task_date: today, carried_from: t.carried_from || t.task_date })
+        .eq('id', t.id);
     }
   }
 
-  state.logs = {};
-  for (const row of logs.data || []) state.logs[row.log_date] = row;
-
-  state.reviews  = reviews.data || [];
-  state.settings = settings.data || {};
-}
-
-function todayLog() {
-  const k = dateKey();
-  if (!state.logs[k]) {
-    state.logs[k] = {
-      user_id: state.user.id, log_date: k,
-      sabqi_done: false, manzil_done: false, arabic_done: false,
-      sabqi_done_at: null, manzil_done_at: null, arabic_done_at: null
-    };
+  // 2. Plan today, once.
+  if (state.progress.lastPlanned !== today) {
+    const { tasks, next } = planDay(state.progress, state.config, isoDay());
+    if (tasks.length) {
+      const rows = tasks.map((t) => ({
+        user_id: state.user.id, task_date: today, kind: t.kind,
+        page_from: t.from, page_to: t.to, label: t.label
+      }));
+      const { error } = await sb.from('daily_tasks').insert(rows);
+      if (error) { console.error('could not plan today', error); return; }
+    }
+    state.progress = { ...next, lastPlanned: today };
+    saveProgress();
   }
-  return state.logs[k];
+
+  const { data } = await sb.from('daily_tasks').select('*').eq('task_date', today);
+  state.tasks = data || [];
+  const h = state.history[today] || (state.history[today] = { total: 0, done: 0 });
+  h.total = state.tasks.length;
+  h.done = state.tasks.filter((t) => t.done).length;
 }
 
-/* ------------------------------------------------------------------ *
- * Today
- * ------------------------------------------------------------------ */
+// A settings change should show up in today's portion straight away. Undone
+// generated rows are dropped and the cursors rewound to where they started
+// (a chunk's first page IS the cursor before it was taken), then replanned.
+async function regenerateToday() {
+  const today = dateKey();
+  const mine = state.tasks.filter((t) => !t.carried_from);
+  const undone = mine.filter((t) => !t.done);
+  if (!undone.length && mine.length) return;   // nothing to redo
+
+  const rewound = { ...state.progress };
+  for (const t of undone) {
+    if (t.kind === 'manzil') rewound.manzilCursor = t.page_from;
+    if (t.kind === 'sabqi')  rewound.sabqiCursor  = t.page_from;
+  }
+  if (undone.length) {
+    await sb.from('daily_tasks').delete().in('id', undone.map((t) => t.id));
+  }
+
+  // Don't re-issue a kind that was already completed today.
+  const doneKinds = new Set(mine.filter((t) => t.done).map((t) => t.kind));
+  const { tasks, next } = planDay(rewound, state.config, isoDay());
+  const fresh = tasks.filter((t) => !doneKinds.has(t.kind));
+  if (fresh.length) {
+    await sb.from('daily_tasks').insert(fresh.map((t) => ({
+      user_id: state.user.id, task_date: today, kind: t.kind,
+      page_from: t.from, page_to: t.to, label: t.label
+    })));
+  }
+  state.progress = { ...next, lastPlanned: today };
+  saveProgress();
+
+  const { data } = await sb.from('daily_tasks').select('*').eq('task_date', today);
+  state.tasks = data || [];
+  const h = state.history[today] || (state.history[today] = { total: 0, done: 0 });
+  h.total = state.tasks.length; h.done = state.tasks.filter((t) => t.done).length;
+}
+
+/* ══════════════════════ Today ══════════════════════ */
+function todaysInspiration() {
+  const n = state.inspirations.length;
+  if (!n) return null;
+  // Stable for the whole day, moves on at midnight.
+  const days = Math.floor(parseKey(dateKey()).getTime() / 86400000);
+  return state.inspirations[((days % n) + n) % n];
+}
+
+function greeting() {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  return 'Good evening';
+}
+
 function renderToday() {
   const now = new Date();
-  const wd  = isoDay(now);
-  const plan = state.plan[wd] || { sabqi: '', manzil: '', arabic: '' };
-  const log  = todayLog();
+  $('t-eyebrow').textContent =
+    `${DAYS_LONG[isoDay(now)-1]} · ${now.toLocaleDateString(undefined,{day:'numeric',month:'long'})}`;
+  $('t-greeting').textContent = greeting();
 
-  $('today-weekday').textContent = DAYS[wd - 1];
-  $('today-date').textContent = now.toLocaleDateString(undefined, {
-    day: 'numeric', month: 'long', year: 'numeric'
-  });
+  const ins = todaysInspiration();
+  if (ins) {
+    $('insp-body').textContent = ins.body;
+    $('insp-src').textContent = ins.source;
+    $('insp-note').textContent = ins.encouragement || '';
+    $('insp-note').hidden = !ins.encouragement;
+    $('inspire').hidden = false;
+  } else { $('inspire').hidden = true; }
 
-  $('today-tasks').innerHTML = TASKS.map(({ key, label }) => {
-    const done = log[`${key}_done`];
-    const text = (plan[key] || '').trim();
-    const at   = log[`${key}_done_at`];
-    const time = done && at
-      ? new Date(at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-      : '';
+  // Ring: pages remaining today.
+  const pagesOf = (t) => t.page_to - t.page_from + 1;
+  const total = state.tasks.reduce((a, t) => a + pagesOf(t), 0);
+  const left  = state.tasks.filter((t) => !t.done).reduce((a, t) => a + pagesOf(t), 0);
+  const frac  = total ? (total - left) / total : 0;
+  const C = 2 * Math.PI * 52;
+  $('ring-fg').style.strokeDashoffset = String(C * (1 - frac));
+  $('ring-num').textContent = total === 0 ? '—' : (left === 0 ? '✓' : left);
+  $('ring-lbl').textContent = total === 0 ? 'nothing due'
+                            : (left === 0 ? 'all done' : (left === 1 ? 'page left' : 'pages left'));
+
+  $('m-streak').textContent = streak();
+  $('m-known').textContent = state.progress ? state.progress.memTo - state.progress.memFrom + 1 : 0;
+  const cyc = state.progress ? cycleLengthDays(state.progress, state.config) : null;
+  $('m-cycle').textContent = cyc ? cyc.revisionDays : '—';
+
+  const KIND = {
+    sabaq:  { label: 'New page', cls: 'k-sabaq' },
+    sabqi:  { label: 'Sabqi',    cls: 'k-sabqi' },
+    manzil: { label: 'Manzil',   cls: 'k-manzil' }
+  };
+  const order = { sabaq: 0, sabqi: 1, manzil: 2 };
+  const sorted = [...state.tasks].sort((a,b) => order[a.kind] - order[b.kind]);
+
+  $('tasks').innerHTML = sorted.map((t) => {
+    const k = KIND[t.kind];
+    const pages = t.page_to - t.page_from + 1;
+    const range = t.page_from === t.page_to ? `p.${t.page_from}` : `p.${t.page_from}–${t.page_to}`;
+    const carried = t.carried_from
+      ? `<span class="chip">From ${DAYS_SHORT[isoDay(parseKey(t.carried_from))-1]}</span>` : '';
     return `
-      <button class="task ${done ? 'is-done' : ''}" data-task="${key}"
-              type="button" aria-pressed="${done}">
-        <span class="box">${done ? '&#10003;' : ''}</span>
+      <button class="task ${t.done?'is-done':''} ${t.carried_from?'is-carried':''}"
+              data-id="${t.id}" type="button" aria-pressed="${t.done}">
+        <span class="tick">${svg(ICONS.check)}</span>
         <span>
-          <span class="task-label">${label}${time ? ' &middot; ' + esc(time) : ''}</span>
-          <span class="task-text ${text ? '' : 'is-empty'}">${
-            text ? esc(text) : 'Nothing set - add it in the Week tab'
-          }</span>
+          <span class="task-top"><span class="kind ${k.cls}">${k.label}</span>${carried}</span>
+          <span class="task-name">${esc(t.label)}</span>
+          <span class="task-meta">${range} · ${pages} page${pages>1?'s':''}</span>
         </span>
       </button>`;
   }).join('');
 
-  renderStats();
+  const none = state.tasks.length === 0;
+  $('today-empty').hidden = !none;
+  $('today-empty').textContent = state.config.restDays.includes(isoDay())
+    ? 'Rest day. Nothing scheduled.' : 'Nothing due today.';
 }
 
-function toggleTask(key) {
-  const log  = todayLog();
-  const next = !log[`${key}_done`];
-  log[`${key}_done`] = next;
-  log[`${key}_done_at`] = next ? new Date().toISOString() : null;
-
-  renderToday();                       // paint first, sync after
-  if (navigator.vibrate) navigator.vibrate(next ? 14 : 8);
-
-  enqueue({
-    id: `daily:${log.log_date}`,
-    table: 'daily_log',
-    row: { ...log, user_id: state.user.id, updated_at: new Date().toISOString() }
-  });
+function streak() {
+  let n = 0;
+  let c = new Date();
+  const full = (k) => { const h = state.history[k]; return h && h.total > 0 && h.done === h.total; };
+  if (!full(dateKey(c))) c = addDays(c, -1);
+  while (full(dateKey(c))) { n++; c = addDays(c, -1); }
+  return n;
 }
 
-$('today-tasks').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-task]');
-  if (btn) toggleTask(btn.dataset.task);
+$('tasks').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-id]');
+  if (!btn) return;
+  const t = state.tasks.find((x) => x.id === btn.dataset.id);
+  if (!t) return;
+
+  t.done = !t.done;
+  t.done_at = t.done ? new Date().toISOString() : null;
+  buzz(t.done ? 12 : 8);
+
+  const h = state.history[dateKey()] || (state.history[dateKey()] = { total: state.tasks.length, done: 0 });
+  h.done = state.tasks.filter((x) => x.done).length;
+  renderToday();
+
+  enqueue({ id: `task:${t.id}`, type: 'update', table: 'daily_tasks',
+            rowId: t.id, row: { done: t.done, done_at: t.done_at } });
+
+  // Finishing the new page is what actually grows the memorized range.
+  if (t.kind === 'sabaq') {
+    if (t.done) {
+      state.progress = { ...absorbSabaq(state.progress, state.config, t.page_from, t.page_to),
+                         lastPlanned: state.progress.lastPlanned };
+      toast('New page added to your rotation');
+    } else if (state.config.direction === 'backward' && state.progress.memFrom === t.page_from) {
+      state.progress = { ...state.progress, memFrom: t.page_to + 1 };
+    } else if (state.config.direction === 'forward' && state.progress.memTo === t.page_to) {
+      state.progress = { ...state.progress, memTo: t.page_from - 1 };
+    }
+    saveProgress();
+  }
 });
 
-function doneCount(log) {
-  if (!log) return 0;
-  return (log.sabqi_done ? 1 : 0) + (log.manzil_done ? 1 : 0) + (log.arabic_done ? 1 : 0);
+/* ══════════════════════ Plan ══════════════════════ */
+function surahOptions(sel, value) {
+  sel.innerHTML = SURAHS.map((s) =>
+    `<option value="${s.n}" ${s.n===value?'selected':''}>${s.n}. ${esc(s.name)}</option>`).join('');
+}
+function dayButtons(host, selected, onToggle) {
+  host.innerHTML = DAY_INITIAL.map((d, i) =>
+    `<button type="button" data-d="${i+1}" class="${selected.includes(i+1)?'on':''}">${d}</button>`).join('');
+  host.onclick = (e) => {
+    const b = e.target.closest('[data-d]');
+    if (b) onToggle(Number(b.dataset.d));
+  };
 }
 
-function renderStats() {
-  // A day counts toward the streak when all three tasks are done. Today is
-  // allowed to be unfinished without breaking a streak built up to yesterday.
-  let streak = 0;
-  let cursor = new Date();
-  if (doneCount(state.logs[dateKey(cursor)]) < 3) cursor = addDays(cursor, -1);
-  while (doneCount(state.logs[dateKey(cursor)]) === 3) {
-    streak++;
-    cursor = addDays(cursor, -1);
+function renderPlan() {
+  const p = state.progress, c = state.config;
+
+  // Range pickers reflect the surahs the page range currently covers.
+  const cur = currentSurahRange();
+  surahOptions($('p-from'), cur.from);
+  surahOptions($('p-to'), cur.to);
+
+  for (const btn of $('p-direction').children) btn.classList.toggle('on', btn.dataset.v === c.direction);
+  dayButtons($('p-days'), c.lessonDays, (d) => {
+    c.lessonDays = c.lessonDays.includes(d) ? c.lessonDays.filter((x)=>x!==d) : [...c.lessonDays, d].sort();
+    commitPlan();
+  });
+  dayButtons($('p-rest'), c.restDays, (d) => {
+    c.restDays = c.restDays.includes(d) ? c.restDays.filter((x)=>x!==d) : [...c.restDays, d].sort();
+    commitPlan();
+  });
+  for (const key of ['new_pages_per_lesson','manzil_pages_per_day','sabqi_pages_per_day','sabqi_window_pages']) {
+    $('v-' + key).textContent = c[camel(key)];
   }
 
-  let full = 0;
-  for (let i = 0; i < 30; i++) {
-    if (doneCount(state.logs[dateKey(addDays(new Date(), -i))]) === 3) full++;
-  }
+  // Headline: what this configuration actually means.
+  const cyc = cycleLengthDays(p, c);
+  const held = p.memTo - p.memFrom + 1;
+  const perWeek = c.lessonDays.length * c.newPagesPerLesson;
+  $('plan-summary').innerHTML = `
+    <p class="summary-big">Everything every ${cyc ? cyc.revisionDays : '—'} days</p>
+    <p class="summary-sub">${held} pages held · ${labelForPages(p.memFrom, p.memTo)}<br>
+      ${perWeek} new page${perWeek===1?'':'s'} a week from ${c.lessonDays.length} lesson${c.lessonDays.length===1?'':'s'}</p>`;
 
-  $('stat-streak').textContent = streak;
-  $('stat-30').textContent = full;
+  renderPreview();
 }
 
-/* ------------------------------------------------------------------ *
- * Week editor
- * ------------------------------------------------------------------ */
-function renderWeek() {
-  const today = isoDay();
-  $('week-list').innerHTML = [1, 2, 3, 4, 5, 6, 7].map((wd) => {
-    const p = state.plan[wd] || {};
-    const line = (label, v) =>
-      `<div class="day-line"><b>${label}</b> ${v ? esc(v) : '&mdash;'}</div>`;
-    return `
-      <button class="day-row ${wd === today ? 'is-today' : ''}" data-wd="${wd}" type="button">
-        <div class="day-name">${DAYS[wd - 1]}${
-          wd === today ? '<span class="today-pill">Today</span>' : ''
-        }</div>
-        ${line('Sabqi', p.sabqi)}
-        ${line('Manzil', p.manzil)}
-        ${line('Arabic', p.arabic)}
-      </button>`;
+const camel = (k) => k.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+
+function currentSurahRange() {
+  const p = state.progress;
+  const list = surahsInPages(p.memFrom, p.memTo);
+  return list.length
+    ? { from: list[0].n, to: list[list.length - 1].n }
+    : { from: 44, to: 114 };
+}
+
+function renderPreview() {
+  const rows = preview(state.progress, state.config, isoDay(), 7);
+  $('preview').innerHTML = rows.map((d, i) => {
+    const name = i === 0 ? 'Today' : DAYS_LONG[d.isoWeekday - 1];
+    const lesson = d.tasks.some((t) => t.kind === 'sabaq');
+    if (!d.tasks.length) {
+      return `<div class="pv"><div class="pv-day">${name}</div>
+              <div class="pv-rest">Rest day</div></div>`;
+    }
+    const lines = d.tasks.map((t) => {
+      const range = t.from === t.to ? `p.${t.from}` : `p.${t.from}–${t.to}`;
+      const kind = t.kind === 'sabaq' ? 'New' : t.kind;
+      return `<div class="pv-line"><span class="pv-k">${kind}</span>
+                <span><span class="pv-t">${esc(t.label)}</span>
+                <span class="pv-p"> · ${range}</span></span></div>`;
+    }).join('');
+    return `<div class="pv"><div class="pv-day ${lesson?'is-lesson':''}">${name}${lesson?' · Lesson':''}</div>${lines}</div>`;
   }).join('');
 }
 
-let editingWd = null;
+// Every plan control funnels through here: persist, re-plan today, repaint.
+let commitT;
+async function commitPlan() {
+  saveConfig();
+  renderPlan();
+  clearTimeout(commitT);
+  commitT = setTimeout(async () => {
+    await regenerateToday();
+    if (state.view === 'today') renderToday();
+  }, 400);
+}
 
-$('week-list').addEventListener('click', (e) => {
-  const row = e.target.closest('[data-wd]');
-  if (!row) return;
-  editingWd = Number(row.dataset.wd);
-  const p = state.plan[editingWd] || {};
-  $('sheet-title').textContent = DAYS[editingWd - 1];
-  $('ed-sabqi').value  = p.sabqi  || '';
-  $('ed-manzil').value = p.manzil || '';
-  $('ed-arabic').value = p.arabic || '';
-  $('sheet').hidden = false;
+$('p-direction').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-v]');
+  if (!b) return;
+  state.config.direction = b.dataset.v;
+  commitPlan();
 });
 
-function closeSheet() { $('sheet').hidden = true; editingWd = null; }
+for (const el of document.querySelectorAll('.stepper')) {
+  el.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-d]');
+    if (!b) return;
+    const key = camel(el.dataset.key);
+    const lim = { newPagesPerLesson: [0,10], manzilPagesPerDay: [0,60],
+                  sabqiPagesPerDay: [0,60], sabqiWindowPages: [0,120] }[key];
+    const v = Math.min(lim[1], Math.max(lim[0], state.config[key] + Number(b.dataset.d)));
+    if (v === state.config[key]) return;
+    state.config[key] = v;
+    buzz(6);
+    commitPlan();
+  });
+}
 
-$('ed-cancel').addEventListener('click', closeSheet);
-$('sheet').addEventListener('click', (e) => { if (e.target.id === 'sheet') closeSheet(); });
+for (const id of ['p-from','p-to']) {
+  $(id).addEventListener('change', () => {
+    let a = Number($('p-from').value), b = Number($('p-to').value);
+    if (a > b) { if (id === 'p-from') b = a; else a = b; }
+    const r = pagesForSurahRange(a, b);
+    const p = state.progress;
+    state.progress = { ...p, memFrom: r.from, memTo: r.to,
+      sabqiCursor: clamp(p.sabqiCursor, r.from, r.to),
+      manzilCursor: clamp(p.manzilCursor, r.from, r.to) };
+    saveProgress();
+    commitPlan();
+  });
+}
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-$('ed-save').addEventListener('click', () => {
-  if (!editingWd) return;
-  const row = {
-    user_id: state.user.id,
-    weekday: editingWd,
-    sabqi:  $('ed-sabqi').value.trim(),
-    manzil: $('ed-manzil').value.trim(),
-    arabic: $('ed-arabic').value.trim(),
-    updated_at: new Date().toISOString()
-  };
-  state.plan[editingWd] = row;
-  enqueue({ id: `plan:${editingWd}`, table: 'weekly_plan', row });
-  closeSheet();
-  renderWeek();
-  renderToday();
-  toast('Saved');
-});
-
-/* ------------------------------------------------------------------ *
- * History heatmap - 8 weeks, one hue light to dark by tasks completed
- * ------------------------------------------------------------------ */
-function renderHistory() {
-  const WEEKS = 8;
-  const today = new Date();
-  const todayK = dateKey(today);
-
-  // End the grid on the Sunday of the current week so columns are whole weeks.
+/* ══════════════════════ Progress ══════════════════════ */
+function renderProgress() {
+  const WEEKS = 8, today = new Date(), todayK = dateKey(today);
   const end = addDays(today, 7 - isoDay(today));
-  const start = addDays(end, -(WEEKS * 7 - 1));
+  const start = addDays(end, -(WEEKS*7 - 1));
 
-  // Row labels: a heatmap with no orientation is a wall of squares.
   let html = '<div class="hm-labels">' +
-    SHORT.map((d) => `<span class="hm-lbl">${d[0]}</span>`).join('') + '</div>';
+    DAY_INITIAL.map((d) => `<span class="hm-lbl">${d}</span>`).join('') + '</div>';
   for (let w = 0; w < WEEKS; w++) {
     html += '<div class="hm-col">';
     for (let d = 0; d < 7; d++) {
-      const day = addDays(start, w * 7 + d);
-      const k = dateKey(day);
-      const n = doneCount(state.logs[k]);
-      const future = k > todayK;
-      const label = day.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-      html += `<span class="cell lv${n} ${future ? 'is-future' : ''}"
-                     data-day="${esc(label)}" data-n="${future ? -1 : n}"
-                     title="${esc(label)} - ${n} of 3"></span>`;
+      const day = addDays(start, w*7 + d), k = dateKey(day);
+      const h = state.history[k];
+      let lv = 0;
+      if (h && h.total) {
+        const f = h.done / h.total;
+        lv = f === 0 ? 0 : f < .5 ? 1 : f < 1 ? 2 : 3;
+      }
+      const label = day.toLocaleDateString(undefined,{day:'numeric',month:'short'});
+      html += `<button class="cell l${lv} ${k>todayK?'is-future':''}" type="button"
+                 data-day="${esc(label)}" data-n="${k>todayK?-1:(h?h.done:0)}"
+                 data-t="${h?h.total:0}" aria-label="${esc(label)}"></button>`;
     }
     html += '</div>';
   }
   $('heatmap').innerHTML = html;
 
-  let done = 0, partial = 0, tracked = 0;
-  for (let i = 0; i < WEEKS * 7; i++) {
-    const k = dateKey(addDays(today, -i));
-    const n = doneCount(state.logs[k]);
-    if (n === 3) done++;
-    else if (n > 0) partial++;
-    tracked++;
+  let done = 0, tracked = 0;
+  for (let i = 0; i < WEEKS*7; i++) {
+    const h = state.history[dateKey(addDays(today, -i))];
+    if (h && h.total) { tracked++; if (h.done === h.total) done++; }
   }
-  const pct = tracked ? Math.round((done / tracked) * 100) : 0;
-  $('history-summary').innerHTML =
-    `Last ${WEEKS} weeks: <b>${done}</b> complete days, <b>${partial}</b> partial ` +
-    `&mdash; <b>${pct}%</b> fully done.`;
+  $('s-done').textContent = done;
+  $('s-rate').textContent = tracked ? Math.round(done/tracked*100) + '%' : '0%';
+
+  if (!$('rv-date').value) $('rv-date').value = dateKey();
+  renderChart();
+  renderReviews();
 }
 
-// title= never appears on a touch device, so make a cell tappable.
 $('heatmap').addEventListener('click', (e) => {
-  const cell = e.target.closest('[data-day]');
-  if (!cell) return;
-  const n = Number(cell.dataset.n);
-  toast(n < 0 ? `${cell.dataset.day} - not yet` : `${cell.dataset.day} - ${n} of 3 done`);
+  const c = e.target.closest('[data-day]');
+  if (!c) return;
+  const n = Number(c.dataset.n), t = Number(c.dataset.t);
+  toast(n < 0 ? `${c.dataset.day} — not yet`
+      : t === 0 ? `${c.dataset.day} — nothing scheduled`
+      : `${c.dataset.day} — ${n} of ${t} done`);
 });
 
-/* ------------------------------------------------------------------ *
- * Weekly review + trend chart
- * ------------------------------------------------------------------ */
-// "42/48" -> { value: 42, total: 48 }; "42" -> { value: 42, total: null }
 function parsePages(s) {
   if (!s) return null;
   const m = String(s).match(/(\d+(?:\.\d+)?)\s*(?:\/\s*(\d+(?:\.\d+)?))?/);
-  if (!m) return null;
-  return { value: parseFloat(m[1]), total: m[2] ? parseFloat(m[2]) : null };
+  return m ? { value: parseFloat(m[1]), total: m[2] ? parseFloat(m[2]) : null } : null;
 }
 
 function renderChart() {
@@ -396,115 +551,80 @@ function renderChart() {
     .map((r) => ({ date: r.review_date, p: parsePages(r.zero_hesitation_pages) }))
     .filter((r) => r.p)
     .map((r) => ({ date: r.date, value: r.p.value, total: r.p.total }))
-    .sort((a, b) => a.date.localeCompare(b.date));
+    .sort((a,b) => a.date.localeCompare(b.date));
 
-  const host  = $('chart');
-  const empty = $('chart-empty');
+  if (pts.length < 2) { $('chart').innerHTML = ''; $('chart-empty').hidden = false; return; }
+  $('chart-empty').hidden = true;
 
-  if (pts.length < 2) {
-    host.innerHTML = '';
-    empty.hidden = false;
-    return;
-  }
-  empty.hidden = true;
+  const W = 320, H = 140, P = { t: 8, r: 8, b: 22, l: 30 };
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const top = Math.ceil(Math.max(...pts.map((p) => p.total || p.value)) * 1.1 / 10) * 10 || 10;
+  const x = (i) => P.l + (pts.length === 1 ? iw/2 : i/(pts.length-1)*iw);
+  const y = (v) => P.t + ih - (v/top)*ih;
 
-  const W = 320, H = 150;
-  const pad = { t: 10, r: 10, b: 24, l: 34 };
-  const iw = W - pad.l - pad.r;
-  const ih = H - pad.t - pad.b;
+  const css = getComputedStyle(document.body);
+  const accent = css.getPropertyValue('--accent').trim();
+  const line = css.getPropertyValue('--line').trim();
+  const ink3 = css.getPropertyValue('--ink-3').trim();
+  const surface = css.getPropertyValue('--surface').trim();
 
-  const maxV = Math.max(...pts.map((p) => p.total || p.value));
-  const top  = Math.ceil(maxV * 1.1 / 10) * 10 || 10;
+  const grid = [0, top/2, top].map((v) => `
+    <line x1="${P.l}" x2="${W-P.r}" y1="${y(v)}" y2="${y(v)}" stroke="${line}" stroke-width="1"/>
+    <text x="${P.l-6}" y="${y(v)+3.5}" text-anchor="end" font-size="9.5" fill="${ink3}">${Math.round(v)}</text>`).join('');
+  const path = pts.map((p,i) => `${i?'L':'M'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
+  const dots = pts.map((p,i) =>
+    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="3.6"
+             fill="${accent}" stroke="${surface}" stroke-width="2"/>`).join('');
+  const ends = [0, pts.length-1].map((i) =>
+    `<text x="${x(i).toFixed(1)}" y="${H-5}" text-anchor="${i?'end':'start'}"
+           font-size="9.5" fill="${ink3}">${esc(parseKey(pts[i].date)
+             .toLocaleDateString(undefined,{day:'numeric',month:'short'}))}</text>`).join('');
 
-  const x = (i) => pad.l + (pts.length === 1 ? iw / 2 : (i / (pts.length - 1)) * iw);
-  const y = (v) => pad.t + ih - (v / top) * ih;
-
-  const gridVals = [0, top / 2, top];
-  const grid = gridVals.map((v) => `
-    <line x1="${pad.l}" x2="${W - pad.r}" y1="${y(v)}" y2="${y(v)}"
-          stroke="#2c3831" stroke-width="1"/>
-    <text x="${pad.l - 7}" y="${y(v) + 4}" text-anchor="end"
-          font-size="10" fill="#6f8177">${Math.round(v)}</text>`).join('');
-
-  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
-  const dots = pts.map((p, i) =>
-    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="4"
-             fill="#3ecf8e" stroke="#18201c" stroke-width="2"/>`).join('');
-
-  // Label only the ends, never every point.
-  const endLabels = [0, pts.length - 1].map((i) => {
-    const p = pts[i];
-    const anchor = i === 0 ? 'start' : 'end';
-    const d = parseKey(p.date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-    return `<text x="${x(i).toFixed(1)}" y="${H - 6}" text-anchor="${anchor}"
-                  font-size="10" fill="#6f8177">${esc(d)}</text>`;
-  }).join('');
-
-  host.innerHTML = `
+  $('chart').innerHTML = `
     <svg viewBox="0 0 ${W} ${H}" role="img"
-         aria-label="Zero-hesitation pages over ${pts.length} weekly reviews">
+         aria-label="Zero-hesitation pages across ${pts.length} reviews">
       ${grid}
-      <path d="${line}" fill="none" stroke="#3ecf8e" stroke-width="2"
+      <path d="${path}" fill="none" stroke="${accent}" stroke-width="2.2"
             stroke-linecap="round" stroke-linejoin="round"/>
-      ${dots}
-      ${endLabels}
-      <line id="cross" x1="0" x2="0" y1="${pad.t}" y2="${pad.t + ih}"
-            stroke="#3ecf8e" stroke-width="1" opacity="0"/>
-    </svg>
-    <div class="tip" id="tip" hidden></div>`;
+      ${dots}${ends}
+      <line id="cross" x1="0" x2="0" y1="${P.t}" y2="${P.t+ih}" stroke="${accent}"
+            stroke-width="1" opacity="0"/>
+    </svg><div class="tip" id="tip" hidden></div>`;
 
-  const svg   = host.querySelector('svg');
-  const tip   = $('tip');
-  const cross = host.querySelector('#cross');
-
-  function move(ev) {
-    const box = svg.getBoundingClientRect();
-    const px  = ((ev.clientX - box.left) / box.width) * W;
+  const el = $('chart').querySelector('svg'), tip = $('tip'), cross = $('chart').querySelector('#cross');
+  const move = (ev) => {
+    const box = el.getBoundingClientRect();
+    const px = ((ev.clientX - box.left)/box.width)*W;
     let best = 0;
-    for (let i = 1; i < pts.length; i++) {
-      if (Math.abs(x(i) - px) < Math.abs(x(best) - px)) best = i;
-    }
+    for (let i = 1; i < pts.length; i++) if (Math.abs(x(i)-px) < Math.abs(x(best)-px)) best = i;
     const p = pts[best];
-    const pctTxt = p.total ? ` (${Math.round((p.value / p.total) * 100)}%)` : '';
-    const d = parseKey(p.date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-    tip.innerHTML = `${esc(d)} &middot; <b>${p.value}${p.total ? '/' + p.total : ''}</b>${pctTxt}`;
+    const pct = p.total ? ` (${Math.round(p.value/p.total*100)}%)` : '';
+    tip.innerHTML = `${esc(parseKey(p.date).toLocaleDateString(undefined,{day:'numeric',month:'short'}))}
+                     · <b>${p.value}${p.total?'/'+p.total:''}</b>${pct}`;
     tip.hidden = false;
-    tip.style.left = `${(x(best) / W) * 100}%`;
-    tip.style.top  = `${(y(p.value) / H) * box.height}px`;
-    cross.setAttribute('x1', x(best));
-    cross.setAttribute('x2', x(best));
-    cross.setAttribute('opacity', '.35');
-  }
-  function leave() { tip.hidden = true; cross.setAttribute('opacity', '0'); }
-
-  svg.addEventListener('pointermove', move);
-  svg.addEventListener('pointerdown', move);
-  svg.addEventListener('pointerleave', leave);
+    tip.style.left = `${x(best)/W*100}%`;
+    tip.style.top  = `${y(p.value)/H*box.height}px`;
+    cross.setAttribute('x1', x(best)); cross.setAttribute('x2', x(best));
+    cross.setAttribute('opacity', '.3');
+  };
+  el.addEventListener('pointermove', move);
+  el.addEventListener('pointerdown', move);
+  el.addEventListener('pointerleave', () => { tip.hidden = true; cross.setAttribute('opacity','0'); });
 }
 
 function renderReviews() {
   $('review-list').innerHTML = state.reviews.map((r) => {
     const bits = [];
-    if (r.zero_hesitation_pages) bits.push(`Zero-hesitation ${esc(r.zero_hesitation_pages)}`);
-    if (r.weak_pages)            bits.push(`Weak ${esc(r.weak_pages)}`);
+    if (r.zero_hesitation_pages) bits.push(`Zero hesitation ${esc(r.zero_hesitation_pages)}`);
+    if (r.weak_pages) bits.push(`Weak ${esc(r.weak_pages)}`);
     if (r.arabic_pages_completed != null) bits.push(`Arabic ${r.arabic_pages_completed}p`);
-    if (r.vocab_roots_logged != null)     bits.push(`${r.vocab_roots_logged} roots`);
-    const d = parseKey(r.review_date).toLocaleDateString(undefined, {
-      day: 'numeric', month: 'short', year: 'numeric'
-    });
-    return `
-      <div class="review-item">
-        <div class="review-date">${esc(d)}</div>
-        ${bits.length ? `<div class="review-meta">${bits.join(' &middot; ')}</div>` : ''}
-        ${r.note ? `<div class="review-note">${esc(r.note)}</div>` : ''}
-      </div>`;
+    if (r.vocab_roots_logged != null) bits.push(`${r.vocab_roots_logged} roots`);
+    return `<div class="review-item">
+      <div class="review-date">${esc(parseKey(r.review_date)
+        .toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'}))}</div>
+      ${bits.length?`<div class="review-meta">${bits.join(' · ')}</div>`:''}
+      ${r.note?`<div class="review-note">${esc(r.note)}</div>`:''}</div>`;
   }).join('');
-}
-
-function renderReview() {
-  if (!$('rv-date').value) $('rv-date').value = dateKey();
-  renderChart();
-  renderReviews();
 }
 
 $('review-form').addEventListener('submit', (e) => {
@@ -520,143 +640,155 @@ $('review-form').addEventListener('submit', (e) => {
     note: $('rv-note').value.trim(),
     updated_at: new Date().toISOString()
   };
-
   const i = state.reviews.findIndex((r) => r.review_date === row.review_date);
-  if (i >= 0) state.reviews[i] = { ...state.reviews[i], ...row };
-  else state.reviews.unshift(row);
-  state.reviews.sort((a, b) => b.review_date.localeCompare(a.review_date));
-
-  enqueue({ id: `review:${row.review_date}`, table: 'weekly_review', row });
-
-  ['rv-zero', 'rv-weak', 'rv-arabic', 'rv-vocab', 'rv-note'].forEach((id) => { $(id).value = ''; });
-  renderReview();
-
-  const msg = $('rv-msg');
-  msg.hidden = false;
-  msg.classList.remove('is-err');
-  msg.textContent = 'Review saved.';
-  setTimeout(() => { msg.hidden = true; }, 2600);
+  if (i >= 0) state.reviews[i] = { ...state.reviews[i], ...row }; else state.reviews.unshift(row);
+  state.reviews.sort((a,b) => b.review_date.localeCompare(a.review_date));
+  enqueue({ id: `review:${row.review_date}`, type: 'upsert', table: 'weekly_review',
+            row, onConflict: 'user_id,review_date' });
+  for (const id of ['rv-zero','rv-weak','rv-arabic','rv-vocab','rv-note']) $(id).value = '';
+  renderProgress();
+  toast('Review saved');
 });
 
-/* ------------------------------------------------------------------ *
- * Settings + reminder
- *
- * A real push at 5:30am with the app closed needs a push server with VAPID
- * keys. This is the honest subset: while the app is open (or warm in the
- * background) it fires a local notification at the chosen time.
- * ------------------------------------------------------------------ */
-let reminderTimer;
-
+/* ══════════════════════ More ══════════════════════ */
+let remindT;
 function scheduleReminder() {
-  clearTimeout(reminderTimer);
+  clearTimeout(remindT);
   const t = state.settings.reminder_time;
-  const status = $('remind-status');
-
-  if (!t) {
-    status.textContent = 'No reminder set.';
-    return;
-  }
+  const st = $('remind-status');
+  if (!t) { st.textContent = 'No reminder set.'; return; }
   if (!('Notification' in window) || Notification.permission !== 'granted') {
-    status.textContent = 'Reminder saved. Allow notifications to receive it.';
-    return;
+    st.textContent = 'Saved. Allow notifications to receive it.'; return;
   }
-
   const [h, m] = t.split(':').map(Number);
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(h, m, 0, 0);
-  if (next <= now) next.setDate(next.getDate() + 1);
-
-  const ms = next - now;
-  status.textContent = `Next reminder ${next.toLocaleString(undefined, {
-    weekday: 'short', hour: 'numeric', minute: '2-digit'
-  })}. Fires while the app is open in the background.`;
-
-  // setTimeout saturates past ~24.8 days; the horizon here is under a day.
-  reminderTimer = setTimeout(() => {
-    try {
-      new Notification('Hifdh', { body: "Today's revision is waiting.", tag: 'hifdh-daily' });
-    } catch { /* notification blocked */ }
+  const next = new Date(); next.setHours(h, m, 0, 0);
+  if (next <= new Date()) next.setDate(next.getDate() + 1);
+  st.textContent = `Next ${next.toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'})}. Fires while the app is open in the background.`;
+  remindT = setTimeout(() => {
+    try { new Notification('Hifdh', { body: "Today's portion is waiting.", tag: 'hifdh' }); } catch {}
     scheduleReminder();
-  }, ms);
+  }, next - new Date());
 }
 
 $('remind-save').addEventListener('click', () => {
   const t = $('set-remind').value;
-
-  // Persist first. The permission prompt is fire-and-forget: if it is
-  // dismissed, ignored, or never resolves, the saved time must not be lost.
+  // Save first: a dismissed permission prompt must not lose the setting.
   state.settings.reminder_time = t || null;
-  enqueue({
-    id: 'settings',
-    table: 'settings',
-    row: { user_id: state.user.id, reminder_time: t || null, updated_at: new Date().toISOString() }
-  });
+  enqueue({ id: 'settings', type: 'upsert', table: 'settings',
+            row: { user_id: state.user.id, reminder_time: t || null,
+                   updated_at: new Date().toISOString() }, onConflict: 'user_id' });
   scheduleReminder();
   toast('Reminder saved');
-
   if (t && 'Notification' in window && Notification.permission === 'default') {
-    try {
-      Promise.resolve(Notification.requestPermission())
-        .then(scheduleReminder)
-        .catch(() => { /* denied */ });
-    } catch { /* older callback-only API */ }
+    try { Promise.resolve(Notification.requestPermission()).then(scheduleReminder).catch(()=>{}); } catch {}
   }
 });
 
-function renderSettings() {
+function renderMore() {
   $('set-email').textContent = state.user.email || '';
-  $('set-remind').value = state.settings.reminder_time
-    ? state.settings.reminder_time.slice(0, 5)
-    : '';
+  $('set-remind').value = state.settings.reminder_time ? state.settings.reminder_time.slice(0,5) : '';
   scheduleReminder();
 }
 
-/* ------------------------------------------------------------------ *
- * Navigation
- * ------------------------------------------------------------------ */
-const RENDER = {
-  today: renderToday, week: renderWeek, history: renderHistory,
-  review: renderReview, settings: renderSettings
+$('signout').addEventListener('click', async () => { await sb.auth.signOut(); location.reload(); });
+
+/* ══════════════════════ nav ══════════════════════ */
+const VIEWS = {
+  today:    { label: 'Today',    icon: ICONS.today,    render: renderToday },
+  plan:     { label: 'Plan',     icon: ICONS.plan,     render: renderPlan },
+  progress: { label: 'Progress', icon: ICONS.progress, render: renderProgress },
+  more:     { label: 'More',     icon: ICONS.more,     render: renderMore }
 };
+
+$('tabs').innerHTML = Object.entries(VIEWS).map(([k, v]) =>
+  `<button class="tab" data-view="${k}" type="button">${svg(v.icon)}<span>${v.label}</span></button>`).join('');
 
 function show(view) {
   state.view = view;
-  for (const v of Object.keys(RENDER)) $(`view-${v}`).hidden = v !== view;
-  for (const tab of document.querySelectorAll('.tab')) {
-    tab.classList.toggle('is-active', tab.dataset.view === view);
-  }
-  RENDER[view]();
+  for (const k of Object.keys(VIEWS)) $(`view-${k}`).hidden = k !== view;
+  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.dataset.view === view);
+  VIEWS[view].render();
   window.scrollTo(0, 0);
 }
-
 $('tabs').addEventListener('click', (e) => {
-  const tab = e.target.closest('[data-view]');
-  if (tab) show(tab.dataset.view);
+  const t = e.target.closest('[data-view]');
+  if (t) { buzz(4); show(t.dataset.view); }
 });
 
-// Coming back to a home-screen PWA after midnight must re-render "today".
+// Coming back after midnight must re-plan, not show yesterday.
 let lastDay = dateKey();
-document.addEventListener('visibilitychange', () => {
+document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState !== 'visible') return;
   flush();
-  if (dateKey() !== lastDay) { lastDay = dateKey(); show('today'); }
-  else if (state.view === 'today') renderToday();
+  if (dateKey() !== lastDay) {
+    lastDay = dateKey();
+    await ensureDayPlanned();
+    show('today');
+  } else if (state.view === 'today') renderToday();
 });
 
-/* ------------------------------------------------------------------ *
- * Boot
- * ------------------------------------------------------------------ */
+/* ══════════════════════ auth ══════════════════════ */
+$('auth-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('auth-btn'), msg = $('auth-msg');
+  btn.disabled = true; btn.textContent = 'Sending…';
+  const { error } = await sb.auth.signInWithOtp({
+    email: $('email').value.trim(),
+    options: { emailRedirectTo: window.location.origin + window.location.pathname }
+  });
+  btn.disabled = false; btn.textContent = 'Continue';
+  msg.hidden = false;
+  msg.classList.toggle('is-err', !!error);
+  msg.textContent = error ? error.message : 'Check your email and tap the link.';
+});
+
+/* ══════════════════════ first run ══════════════════════ */
+function renderSetup() {
+  surahOptions($('su-from'), 44);
+  surahOptions($('su-to'), 114);
+  let days = [1, 5];
+  const paintDays = () => dayButtons($('su-days'), days, (d) => {
+    days = days.includes(d) ? days.filter((x) => x !== d) : [...days, d].sort();
+    renderSetup.days = days;
+    paintDays();
+  });
+  paintDays();
+  renderSetup.days = days;
+
+  const sync = () => {
+    let a = Number($('su-from').value), b = Number($('su-to').value);
+    if (a > b) [a, b] = [b, a];
+    const r = pagesForSurahRange(a, b);
+    $('setup-summary').textContent =
+      `${r.to - r.from + 1} pages · ${labelForPages(r.from, r.to)}`;
+  };
+  $('su-from').onchange = sync; $('su-to').onchange = sync;
+  sync();
+
+  $('setup-go').onclick = async () => {
+    let a = Number($('su-from').value), b = Number($('su-to').value);
+    if (a > b) [a, b] = [b, a];
+    const r = pagesForSurahRange(a, b);
+    state.config = { ...DEFAULT_CONFIG, lessonDays: [...renderSetup.days].sort() };
+    state.progress = { memFrom: r.from, memTo: r.to, sabqiCursor: r.from,
+                       manzilCursor: 0, lastPlanned: null };
+    await sb.from('plan_config').upsert(cfgToRow(state.config), { onConflict: 'user_id' });
+    await sb.from('progress').upsert(progToRow(state.progress), { onConflict: 'user_id' });
+    $('setup').hidden = true;
+    await ensureDayPlanned();
+    $('app').hidden = false;
+    show('today');
+  };
+}
+
+/* ══════════════════════ boot ══════════════════════ */
 async function start(session) {
   state.user = session.user;
-  try {
-    await loadAll();
-  } catch (err) {
-    console.error(err);
-    toast('Could not load data', true);
-  }
-  $('boot').hidden = true;
-  $('auth').hidden = true;
+  try { await loadAll(); } catch (err) { console.error(err); toast('Could not load', true); }
+  $('boot').hidden = true; $('auth').hidden = true;
+
+  if (!state.progress) { $('setup').hidden = false; renderSetup(); return; }
+  await ensureDayPlanned();
   $('app').hidden = false;
   show('today');
   flush();
@@ -664,19 +796,13 @@ async function start(session) {
 
 (async function boot() {
   const { data: { session } } = await sb.auth.getSession();
-  if (session) {
-    await start(session);
-  } else {
-    $('boot').hidden = true;
-    $('auth').hidden = false;
-  }
+  if (session) await start(session);
+  else { $('boot').hidden = true; $('auth').hidden = false; }
 
-  sb.auth.onAuthStateChange((event, s) => {
-    if (event === 'SIGNED_IN' && s && !state.user) start(s);
-    if (event === 'SIGNED_OUT') location.reload();
+  sb.auth.onAuthStateChange((ev, s) => {
+    if (ev === 'SIGNED_IN' && s && !state.user) start(s);
+    if (ev === 'SIGNED_OUT') location.reload();
   });
 
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => { /* offline cache is optional */ });
-  }
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();

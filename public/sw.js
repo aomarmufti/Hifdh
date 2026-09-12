@@ -1,7 +1,8 @@
 // Bump CACHE when shipping new assets; the old cache is dropped on activate.
-const CACHE = 'hifdh-v1';
+const CACHE = 'hifdh-v2';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './config.js',
+  './lib/quran.js', './lib/engine.js',
   './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'
 ];
 

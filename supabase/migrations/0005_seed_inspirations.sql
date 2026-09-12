@@ -1,0 +1,37 @@
+-- The daily opening message: a verse or hadith with its source and one line of
+-- encouragement. Picked by date in the client, so it is stable for a whole day
+-- and rotates for over a month before repeating. Dollar-quoted so the
+-- apostrophes need no escaping.
+insert into public.inspirations (kind, body, source, encouragement) values
+('ayah', $q$And We have certainly made the Qur'an easy for remembrance, so is there any who will remember?$q$, $q$Al-Qamar 54:17$q$, $q$The difficulty you feel is the work, not a verdict on you.$q$),
+('ayah', $q$Indeed, it is We who sent down the Qur'an, and indeed, We will be its guardian.$q$, $q$Al-Hijr 15:9$q$, $q$You are carrying something that is already protected. Just keep your grip.$q$),
+('ayah', $q$So recite what is easy from the Qur'an.$q$, $q$Al-Muzzammil 73:20$q$, $q$Start with the portion you can hold today. That is the instruction.$q$),
+('ayah', $q$And recite the Qur'an with measured recitation.$q$, $q$Al-Muzzammil 73:4$q$, $q$Slow is not behind. Slow is the method.$q$),
+('ayah', $q$And say: My Lord, increase me in knowledge.$q$, $q$Ta-Ha 20:114$q$, $q$Ask before you begin today.$q$),
+('ayah', $q$Indeed, with hardship comes ease.$q$, $q$Ash-Sharh 94:6$q$, $q$The page that resists you today is the one that will feel easiest in a month.$q$),
+('ayah', $q$Allah does not burden a soul beyond what it can bear.$q$, $q$Al-Baqarah 2:286$q$, $q$If the portion feels impossible, shrink it. That is allowed.$q$),
+('ayah', $q$And whoever fears Allah, He will make a way out for him.$q$, $q$At-Talaq 65:2$q$, $q$Show up for the portion and let the opening come.$q$),
+('ayah', $q$So remember Me; I will remember you.$q$, $q$Al-Baqarah 2:152$q$, $q$Every line you revise is an exchange, not an expense.$q$),
+('ayah', $q$Truly, in the remembrance of Allah do hearts find rest.$q$, $q$Ar-Ra'd 13:28$q$, $q$Open the mushaf before you reach for anything else.$q$),
+('ayah', $q$And be patient, for indeed, Allah does not allow the reward of the doers of good to be lost.$q$, $q$Hud 11:115$q$, $q$Nothing you revised and later forgot was wasted.$q$),
+('ayah', $q$A blessed Book which We have revealed to you, that they might reflect upon its verses.$q$, $q$Sad 38:29$q$, $q$Today, understand one verse you have been reciting without thinking.$q$),
+('ayah', $q$Recite in the name of your Lord who created.$q$, $q$Al-'Alaq 96:1$q$, $q$The very first command was to read. You are answering it.$q$),
+('ayah', $q$Indeed, this Qur'an guides to that which is most upright.$q$, $q$Al-Isra 17:9$q$, $q$You are not only storing it. It is shaping you back.$q$),
+('ayah', $q$Then do they not reflect upon the Qur'an?$q$, $q$Muhammad 47:24$q$, $q$Revision is a chance to notice what you had been rushing past.$q$),
+('ayah', $q$Say: Are those who know equal to those who do not know?$q$, $q$Az-Zumar 39:9$q$, $q$The hours nobody sees are the ones doing the work.$q$),
+('ayah', $q$And whatever good you put forward for yourselves, you will find it with Allah.$q$, $q$Al-Baqarah 2:110$q$, $q$This morning's portion is already banked.$q$),
+('ayah', $q$Indeed, Allah is with those who are patient.$q$, $q$Al-Baqarah 2:153$q$, $q$Weak pages are not failure. They are the next instruction.$q$),
+('ayah', $q$It is a Qur'an which We have separated by intervals that you might recite it to people slowly.$q$, $q$Al-Isra 17:106$q$, $q$It came down in portions. It is meant to be held in portions.$q$),
+('ayah', $q$And those who strive for Us, We will surely guide them to Our ways.$q$, $q$Al-'Ankabut 29:69$q$, $q$The striving is yours; the guidance is promised.$q$),
+('hadith', $q$The best of you are those who learn the Qur'an and teach it.$q$, $q$Sahih al-Bukhari 5027$q$, $q$What you hold is meant to be passed on.$q$),
+('hadith', $q$The one who is proficient in the Qur'an will be with the noble, righteous scribes; and the one who recites it and stumbles over it, finding it difficult, will have a double reward.$q$, $q$Sahih al-Bukhari 4937, Sahih Muslim 798$q$, $q$The struggling recitation is worth more, not less.$q$),
+('hadith', $q$It will be said to the companion of the Qur'an: Recite and ascend, and recite as you used to recite in the world, for your rank will be at the last verse you recite.$q$, $q$Sunan Abi Dawud 1464, Jami' at-Tirmidhi 2914$q$, $q$Every page you keep is a step you keep.$q$),
+('hadith', $q$Whoever reads a letter from the Book of Allah will have a good deed, and a good deed is multiplied by ten.$q$, $q$Jami' at-Tirmidhi 2910$q$, $q$Count the letters of today's portion. That is the return.$q$),
+('hadith', $q$Keep refreshing your knowledge of the Qur'an, for by the One in Whose hand my soul is, it escapes more quickly than a camel from its tether.$q$, $q$Sahih al-Bukhari 5033, Sahih Muslim 791$q$, $q$This is exactly why the rotation exists. Trust it.$q$),
+('hadith', $q$The example of the one who knows the Qur'an by heart is like the owner of a tethered camel: if he tends to it he keeps it, and if he lets it go it escapes.$q$, $q$Sahih al-Bukhari 5031, Sahih Muslim 789$q$, $q$Tending it daily is cheaper than catching it later.$q$),
+('hadith', $q$The most beloved of deeds to Allah are those that are most consistent, even if they are few.$q$, $q$Sahih al-Bukhari 6464, Sahih Muslim 783$q$, $q$Eight pages every day beats forty pages once a week.$q$),
+('hadith', $q$Read the Qur'an, for it will come on the Day of Resurrection as an intercessor for its companions.$q$, $q$Sahih Muslim 804$q$, $q$You are building something that will speak for you.$q$),
+('hadith', $q$No people gather in a house of Allah, reciting the Book of Allah and studying it among themselves, but that tranquility descends upon them and mercy envelops them.$q$, $q$Sahih Muslim 2699$q$, $q$Bring someone into your revision if you can.$q$),
+('hadith', $q$Whoever treads a path in search of knowledge, Allah will make easy for him a path to Paradise.$q$, $q$Sahih Muslim 2699$q$, $q$The walk to your lesson counts.$q$),
+('hadith', $q$Whoever is not grateful to people is not grateful to Allah.$q$, $q$Sunan Abi Dawud 4811, Jami' at-Tirmidhi 1954$q$, $q$Thank your teacher this week.$q$),
+('hadith', $q$Take advantage of five before five: your youth before your old age, and your health before your illness.$q$, $q$Al-Mustadrak 7846$q$, $q$The season you are in now is the one to spend.$q$);
