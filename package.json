@@ -1,0 +1,12 @@
+{
+  "name": "hifdh",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Daily Quran revision and Arabic study tracker",
+  "scripts": {
+    "test": "node test/run.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.1"
+  }
+}
