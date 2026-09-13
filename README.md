@@ -3,6 +3,21 @@
 A personal Qur'an revision tracker that **works out what to revise**, rather than
 asking you to. Mobile-first, installable on an iPhone home screen as a PWA.
 
+## Repository
+
+`main` is the branch to work from. Two settings still point at the old
+`claude/quran-arabic-tracker-app-jenqva` branch and can only be changed from
+their settings pages:
+
+1. **GitHub** → Settings → Branches → default branch → `main`
+2. **Vercel** → the `hifdh` project → Settings → Git → Production Branch → `main`
+
+Both branches currently point at the same commit, so nothing breaks either way.
+Once Vercel is repointed, the old branch can be deleted; until then it is what
+serves the live site, so leave it in place.
+
+After that: branch off `main`, open a pull request, let CI run, merge.
+
 ## Live app
 
 https://hifdh-seedsacademy.vercel.app — Share → Add to Home Screen.
@@ -198,4 +213,5 @@ supabase/migrations/  schema as applied
 test/                 engine suite + end-to-end harness
 ```
 
-No bundler, no build step, no runtime dependencies.
+No bundler, no build step, no runtime dependencies. `.github/workflows/ci.yml`
+runs both suites on every push to `main` and every pull request.
