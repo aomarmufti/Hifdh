@@ -26,6 +26,7 @@ function reset(seeded) {
       manzil_pages_per_day: 8, rest_days: [],
       arabic_enabled: true, arabic_text: '', arabic_days: [1,2,3,4,5,6,7] });
     db.progress.push({ user_id: UID, mem_from: 496, mem_to: 604,
+      partial_from: null, partial_to: null,
       sabqi_cursor: 496, manzil_cursor: 0, last_planned_date: null });
   }
 }
@@ -81,7 +82,8 @@ const server = http.createServer(async (req, res) => {
     }
     if (op === 'insert') {
       const rows = b.rows.map((r) => ({ id: 'row-' + (idSeq++), done: false, done_at: null,
-                                        carried_from: null, carried_away: false, ...r }));
+                                        carried_from: null, carried_away: false,
+                                        pages: [], ...r }));
       db[b.table].push(...rows);
       return send(res, 200, { rows });
     }

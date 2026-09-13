@@ -2,8 +2,8 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 import { SURAHS, surahsInPages, pagesForSurahRange, labelForPages } from './lib/quran.js';
 import {
-  DEFAULT_CONFIG, planDay, absorbSabaq, cycleLengthDays,
-  sabqiWindow, manzilPool, preview
+  DEFAULT_CONFIG, planDay, absorbSabaq, undoSabaq, cycleLengthDays, preview,
+  memorizedPages, totalPages, describeRuns, activeSurah, nextNewPages
 } from './lib/engine.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
@@ -127,6 +127,7 @@ const cfgToRow = (c) => ({
 const progToRow = (p) => ({
   user_id: state.user.id,
   mem_from: p.memFrom, mem_to: p.memTo,
+  partial_from: p.partialFrom ?? null, partial_to: p.partialTo ?? null,
   sabqi_cursor: p.sabqiCursor, manzil_cursor: p.manzilCursor,
   last_planned_date: p.lastPlanned,
   updated_at: new Date().toISOString()
@@ -155,6 +156,7 @@ async function loadAll() {
   state.config = cfg.data ? cfgFromRow(cfg.data) : { ...DEFAULT_CONFIG };
   state.progress = prog.data ? {
     memFrom: prog.data.mem_from, memTo: prog.data.mem_to,
+    partialFrom: prog.data.partial_from, partialTo: prog.data.partial_to,
     sabqiCursor: prog.data.sabqi_cursor, manzilCursor: prog.data.manzil_cursor,
     lastPlanned: prog.data.last_planned_date
   } : null;
@@ -196,8 +198,8 @@ async function ensureDayPlanned() {
       .in('id', stale.map((t) => t.id));
     await sb.from('daily_tasks').insert(stale.map((t) => ({
       user_id: state.user.id, task_date: today, kind: t.kind,
-      page_from: t.page_from, page_to: t.page_to, label: t.label,
-      carried_from: t.carried_from || t.task_date
+      page_from: t.page_from, page_to: t.page_to, pages: t.pages || [],
+      label: t.label, carried_from: t.carried_from || t.task_date
     })));
   }
 
@@ -207,7 +209,7 @@ async function ensureDayPlanned() {
     if (tasks.length) {
       const rows = tasks.map((t) => ({
         user_id: state.user.id, task_date: today, kind: t.kind,
-        page_from: t.from, page_to: t.to, label: t.label
+        page_from: t.from, page_to: t.to, pages: t.pages, label: t.label
       }));
       const { error } = await sb.from('daily_tasks').insert(rows);
       if (error) { console.error('could not plan today', error); return; }
@@ -241,8 +243,9 @@ async function regenerateToday() {
 
   const rewound = { ...state.progress };
   for (const t of undone) {
-    if (t.kind === 'manzil') rewound.manzilCursor = t.page_from;
-    if (t.kind === 'sabqi')  rewound.sabqiCursor  = t.page_from;
+    const first = (t.pages && t.pages.length) ? t.pages[0] : t.page_from;
+    if (t.kind === 'manzil') rewound.manzilCursor = first;
+    if (t.kind === 'sabqi')  rewound.sabqiCursor  = first;
   }
   if (undone.length) {
     await sb.from('daily_tasks').delete().in('id', undone.map((t) => t.id));
@@ -255,7 +258,7 @@ async function regenerateToday() {
   if (fresh.length) {
     await sb.from('daily_tasks').insert(fresh.map((t) => ({
       user_id: state.user.id, task_date: today, kind: t.kind,
-      page_from: t.from, page_to: t.to, label: t.label
+      page_from: t.from, page_to: t.to, pages: t.pages, label: t.label
     })));
   }
   state.progress = { ...next, lastPlanned: today };
@@ -295,7 +298,8 @@ function renderToday() {
   } else { $('inspire').hidden = true; }
 
   // Ring: pages remaining today.
-  const pagesOf = (t) => (t.kind === 'arabic' ? 0 : t.page_to - t.page_from + 1);
+  const pagesOf = (t) => (t.pages && t.pages.length ? t.pages.length
+                        : (t.kind === 'arabic' ? 0 : t.page_to - t.page_from + 1));
   const total = state.tasks.reduce((a, t) => a + pagesOf(t), 0);
   const left  = state.tasks.filter((t) => !t.done).reduce((a, t) => a + pagesOf(t), 0);
   const frac  = total ? (total - left) / total : 0;
@@ -306,7 +310,7 @@ function renderToday() {
                             : (left === 0 ? 'all done' : (left === 1 ? 'page left' : 'pages left'));
 
   $('m-streak').textContent = streak();
-  $('m-known').textContent = state.progress ? state.progress.memTo - state.progress.memFrom + 1 : 0;
+  $('m-known').textContent = state.progress ? totalPages(state.progress) : 0;
   const cyc = state.progress ? cycleLengthDays(state.progress, state.config) : null;
   $('m-cycle').textContent = cyc ? cyc.revisionDays : '—';
 
@@ -321,19 +325,42 @@ function renderToday() {
 
   $('tasks').innerHTML = sorted.map((t) => {
     const k = KIND[t.kind];
-    const pages = t.page_to - t.page_from + 1;
-    const isPaged = t.kind !== 'arabic';
-    const range = t.page_from === t.page_to ? `p.${t.page_from}` : `p.${t.page_from}–${t.page_to}`;
+    // Rows written before the pages column existed, or carried copies of them,
+    // still have a span - fall back to it so a range is always shown.
+    let pageList = (t.pages && t.pages.length) ? t.pages : [];
+    if (!pageList.length && t.kind !== 'arabic' && t.page_to >= t.page_from) {
+      for (let p = t.page_from; p <= t.page_to; p++) pageList.push(p);
+    }
+    const runs = pageList.length ? describeRuns(pageList) : [];
+    const n = pageList.length;
     const carried = t.carried_from
       ? `<span class="chip">From ${DAYS_SHORT[isoDay(parseKey(t.carried_from))-1]}</span>` : '';
+
+    // A portion can straddle the gap left by a surah in progress. Each
+    // contiguous run gets its own line rather than one misleading span.
+    let body;
+    if (!runs.length) {
+      body = `<span class="task-name">${esc(t.label)}</span>`;
+    } else if (runs.length === 1) {
+      const r = runs[0];
+      const range = r.from === r.to ? `p.${r.from}` : `p.${r.from}–${r.to}`;
+      body = `<span class="task-name">${esc(r.label)}</span>
+              <span class="task-meta">${range} · ${n} page${n>1?'s':''}</span>`;
+    } else {
+      body = runs.map((r) => {
+        const range = r.from === r.to ? `p.${r.from}` : `p.${r.from}–${r.to}`;
+        return `<span class="task-run"><span class="task-run-name">${esc(r.label)}</span>
+                  <span class="task-run-pages">${range}</span></span>`;
+      }).join('') + `<span class="task-meta">${n} pages across ${runs.length} stretches</span>`;
+    }
+
     return `
       <button class="task ${t.done?'is-done':''} ${t.carried_from?'is-carried':''}"
               data-id="${t.id}" type="button" aria-pressed="${t.done}">
         <span class="tick">${svg(ICONS.check)}</span>
-        <span>
+        <span class="task-body">
           <span class="task-top"><span class="kind ${k.cls}">${k.label}</span>${carried}</span>
-          <span class="task-name">${esc(t.label)}</span>
-          ${isPaged ? `<span class="task-meta">${range} · ${pages} page${pages>1?'s':''}</span>` : ''}
+          ${body}
         </span>
       </button>`;
   }).join('');
@@ -365,24 +392,22 @@ $('tasks').addEventListener('click', async (e) => {
 
   const h = state.history[dateKey()] || (state.history[dateKey()] = { total: state.tasks.length, done: 0 });
   h.done = state.tasks.filter((x) => x.done).length;
+
+  // Finishing the new page is what actually grows what you hold. Apply it
+  // before painting, so the pages-held figure is never a step behind.
+  if (t.kind === 'sabaq') {
+    const moved = t.done
+      ? absorbSabaq(state.progress, state.config, t.page_from, t.page_to)
+      : undoSabaq(state.progress, state.config, t.page_from, t.page_to);
+    state.progress = { ...moved, lastPlanned: state.progress.lastPlanned };
+    saveProgress();
+  }
+
   renderToday();
 
   enqueue({ id: `task:${t.id}`, type: 'update', table: 'daily_tasks',
             rowId: t.id, row: { done: t.done, done_at: t.done_at } });
-
-  // Finishing the new page is what actually grows the memorized range.
-  if (t.kind === 'sabaq') {
-    if (t.done) {
-      state.progress = { ...absorbSabaq(state.progress, state.config, t.page_from, t.page_to),
-                         lastPlanned: state.progress.lastPlanned };
-      toast('New page added to your rotation');
-    } else if (state.config.direction === 'backward' && state.progress.memFrom === t.page_from) {
-      state.progress = { ...state.progress, memFrom: t.page_to + 1 };
-    } else if (state.config.direction === 'forward' && state.progress.memTo === t.page_to) {
-      state.progress = { ...state.progress, memTo: t.page_from - 1 };
-    }
-    saveProgress();
-  }
+  if (t.kind === 'sabaq' && t.done) toast('Added to your rotation');
 });
 
 /* ══════════════════════ Plan ══════════════════════ */
@@ -430,12 +455,18 @@ function renderPlan() {
 
   // Headline: what this configuration actually means.
   const cyc = cycleLengthDays(p, c);
-  const held = p.memTo - p.memFrom + 1;
+  const held = totalPages(p);
   const perWeek = c.lessonDays.length * c.newPagesPerLesson;
+  const next = nextNewPages(p, c);
+  const active = activeSurah(p, c);
+  const weekly = `${perWeek} new page${perWeek===1?'':'s'} a week`;
+  const learning = next && active
+    ? `Now learning ${esc(active.name)} · ${weekly}`
+    : `${weekly} from ${c.lessonDays.length} lesson${c.lessonDays.length===1?'':'s'}`;
   $('plan-summary').innerHTML = `
     <p class="summary-big">Everything every ${cyc ? cyc.revisionDays : '—'} days</p>
-    <p class="summary-sub">${held} pages held · ${labelForPages(p.memFrom, p.memTo)}<br>
-      ${perWeek} new page${perWeek===1?'':'s'} a week from ${c.lessonDays.length} lesson${c.lessonDays.length===1?'':'s'}</p>`;
+    <p class="summary-sub">${held} pages held · ${esc(labelForPages(p.memFrom, p.memTo))}<br>
+      ${learning}</p>`;
 
   renderPreview();
 }
@@ -448,6 +479,19 @@ function currentSurahRange() {
   return list.length
     ? { from: list[0].n, to: list[list.length - 1].n }
     : { from: 44, to: 114 };
+}
+
+// Setting the range by hand replaces everything, including any surah that was
+// part-learned - there is no sensible way to keep a prefix of a surah that may
+// no longer be adjacent to the block.
+function setRange(fromSurah, toSurah) {
+  const r = pagesForSurahRange(fromSurah, toSurah);
+  const p = state.progress;
+  state.progress = { ...p, memFrom: r.from, memTo: r.to,
+    partialFrom: null, partialTo: null,
+    sabqiCursor: clamp(p.sabqiCursor, r.from, r.to),
+    manzilCursor: clamp(p.manzilCursor, r.from, r.to) };
+  saveProgress();
 }
 
 function renderPreview() {
@@ -526,12 +570,7 @@ for (const id of ['p-from','p-to']) {
   $(id).addEventListener('change', () => {
     let a = Number($('p-from').value), b = Number($('p-to').value);
     if (a > b) { if (id === 'p-from') b = a; else a = b; }
-    const r = pagesForSurahRange(a, b);
-    const p = state.progress;
-    state.progress = { ...p, memFrom: r.from, memTo: r.to,
-      sabqiCursor: clamp(p.sabqiCursor, r.from, r.to),
-      manzilCursor: clamp(p.manzilCursor, r.from, r.to) };
-    saveProgress();
+    setRange(a, b);
     commitPlan();
   });
 }
@@ -816,8 +855,8 @@ function renderSetup() {
     if (a > b) [a, b] = [b, a];
     const r = pagesForSurahRange(a, b);
     state.config = { ...DEFAULT_CONFIG, lessonDays: [...renderSetup.days].sort() };
-    state.progress = { memFrom: r.from, memTo: r.to, sabqiCursor: r.from,
-                       manzilCursor: 0, lastPlanned: null };
+    state.progress = { memFrom: r.from, memTo: r.to, partialFrom: null, partialTo: null,
+                       sabqiCursor: r.from, manzilCursor: 0, lastPlanned: null };
     await sb.from('plan_config').upsert(cfgToRow(state.config), { onConflict: 'user_id' });
     await sb.from('progress').upsert(progToRow(state.progress), { onConflict: 'user_id' });
     $('setup').hidden = true;

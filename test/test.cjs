@@ -114,7 +114,7 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
   // incomplete even after the other two are carried forward.
   await api('poke', { table: 'daily_tasks', rows: [
     { id: 'old-1', user_id: 'user-probe-0001', task_date: back(1), kind: 'manzil',
-      page_from: 560, page_to: 567, label: 'At-Tahrim → Al-Ma’arij',
+      page_from: 560, page_to: 567, label: 'At-Tahrim → Al-Haqqah',
       done: false, done_at: null, carried_from: null, carried_away: false },
     { id: 'old-3', user_id: 'user-probe-0001', task_date: back(1), kind: 'sabqi',
       page_from: 496, page_to: 500, label: 'Ad-Dukhan → Al-Jathiyah',
@@ -148,7 +148,11 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
      db.daily_tasks.filter((t) => t.kind === 'arabic' && t.carried_from === back(1)).length === 0);
 
   const txt = await page.textContent('#tasks');
-  ok('the carried task is visible today', txt.includes("Al-Ma’arij") || txt.includes("Ma'arij"), txt.slice(0,300));
+  ok('the carried task is visible today', txt.includes('At-Tahrim'), txt.slice(0,300));
+  ok('its surah names are recomputed from the actual pages, not a stored string',
+     txt.includes('Al-Haqqah'), txt.slice(0,300));
+  ok('a carried row without a stored page array still shows its range',
+     txt.includes('p.560'), txt.slice(0,300));
   ok('and is flagged as carried over', await page.locator('.task.is-carried').first().isVisible());
   ok('the carried-away original is not shown twice today',
      (await page.locator('.task').count()) === db.daily_tasks
@@ -174,7 +178,9 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
   const sum0 = await page.textContent('#plan-summary');
   ok('summary states the full-cycle length', /every 13 days/.test(sum0), sum0.slice(0,120));
   ok('summary states pages held', sum0.includes('109 pages'), sum0.slice(0,120));
-  ok('summary states new pages per week', sum0.includes('2 new pages a week'), sum0.slice(0,160));
+  ok('summary states new pages per week', sum0.includes('2 new pages a week'), sum0.slice(0,200));
+  ok('summary names the surah being learned', sum0.includes('Now learning Az-Zukhruf'),
+     sum0.slice(0,200));
 
   // A surah that merely *ends* on the first memorized page must not be counted
   // as memorized: pages 496-604 starts at Ad-Dukhan (44), not Az-Zukhruf (43).
@@ -271,6 +277,62 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
      db.daily_tasks.filter((t) => t.task_date === key() && t.kind === 'arabic').length === 0);
   await page.check('#p-arabic-on');
   await page.waitForTimeout(1200);
+
+  /* ─────────── 6c. memorisation order ─────────── */
+  console.log('\n[6c] New pages enter each surah at its first page');
+  // Make today a lesson day so a sabaq is scheduled whatever day it is.
+  const wd = isoDay();
+  const dayBtn = page.locator(`#p-days [data-d="${wd}"]`);
+  if (!(await dayBtn.getAttribute('class')).includes('on')) {
+    await dayBtn.click();
+    await page.waitForTimeout(1200);
+  }
+  db = await api('dump');
+  const sabaq = db.daily_tasks.find((t) => t.task_date === key() && t.kind === 'sabaq');
+  ok('a new page is scheduled today', !!sabaq, 'none found');
+  // Holding Ad-Dukhan..An-Nas, the next surah down is Az-Zukhruf (p489-495).
+  // The first new page must be p489, its FIRST page - not p495.
+  ok('the new page is the FIRST page of Az-Zukhruf', sabaq && sabaq.page_from === 489,
+     sabaq && String(sabaq.page_from));
+  ok('it is not the last page of that surah', sabaq && sabaq.page_from !== 495);
+  ok('and it is labelled Az-Zukhruf', sabaq && sabaq.label === 'Az-Zukhruf', sabaq && sabaq.label);
+
+  await page.click('[data-view="today"]');
+  await page.waitForTimeout(250);
+  const tToday = await page.textContent('#tasks');
+  ok('Today shows it as the new page', tToday.includes('Az-Zukhruf') && tToday.includes('p.489'),
+     tToday.slice(0, 260));
+
+  // Completing it must extend what is held without closing the surah yet.
+  const sabaqCard = page.locator(`.task[data-id="${sabaq.id}"]`);
+  await sabaqCard.scrollIntoViewIfNeeded();
+  await sabaqCard.click();
+  await page.waitForTimeout(600);
+  db = await api('dump');
+  ok('the part-learned surah is tracked, block unmoved',
+     db.progress[0].partial_from === 489 && db.progress[0].partial_to === 489 &&
+     db.progress[0].mem_from === 496,
+     JSON.stringify([db.progress[0].partial_from, db.progress[0].partial_to, db.progress[0].mem_from]));
+  ok('pages held goes up by one', (await page.textContent('#m-known')) === '110',
+     await page.textContent('#m-known'));
+
+  // And un-ticking must put it back.
+  await sabaqCard.click();
+  await page.waitForTimeout(600);
+  db = await api('dump');
+  ok('un-ticking removes it again',
+     db.progress[0].partial_from === null && db.progress[0].mem_from === 496,
+     JSON.stringify([db.progress[0].partial_from, db.progress[0].mem_from]));
+  ok('pages held goes back down', (await page.textContent('#m-known')) === '109',
+     await page.textContent('#m-known'));
+
+  await page.click('[data-view="plan"]');
+  await page.waitForTimeout(250);
+  if ((await page.locator(`#p-days [data-d="${wd}"]`).getAttribute('class')).includes('on')
+      && ![1, 5].includes(wd)) {
+    await page.locator(`#p-days [data-d="${wd}"]`).click();   // restore
+    await page.waitForTimeout(1000);
+  }
 
   /* ─────────── 7. direction ─────────── */
   console.log('\n[7] Memorizing direction');
@@ -379,7 +441,9 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
   await dp.waitForTimeout(400);
   await dp.screenshot({ path: `${__dirname}/shot-dark.png` });
   const bg = await dp.evaluate(() => getComputedStyle(document.body).backgroundColor);
-  ok('dark mode paints a dark background', bg === 'rgb(0, 0, 0)', bg);
+  ok('dark mode is deep navy, not pure black', bg === 'rgb(10, 16, 32)', bg);
+  const darkInk = await dp.evaluate(() => getComputedStyle(document.body).color);
+  ok('dark mode text is warm cream, not pure white', darkInk === 'rgb(237, 230, 216)', darkInk);
   await dark.close();
 
   console.log('\n[12] Console');

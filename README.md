@@ -56,10 +56,20 @@ into a perfect one.
 
 ### Memorizing direction
 
-**Backwards** means each new page sits *before* the range you hold — the usual
-route for someone who began at Juz 30 and is working toward the front. Starting
-from Ad-Dukhan, the next new page is the end of Az-Zukhruf. **Forwards** extends
-past the end instead. One tap to switch.
+**Backwards** takes surahs in descending order but learns each one *forwards*,
+from its first page. Having finished Ad-Dukhan you do not start at the last page
+of Az-Zukhruf — you start at p.489, its first page, and work down to where
+Ad-Dukhan begins; then Ash-Shura from *its* first page, and so on.
+
+This means that mid-surah your memorized pages have a hole in them (p.489–491
+held, p.492–495 not, p.496 onward held). A single range cannot express that, so
+the surah in progress is tracked separately and merges into the block when its
+last page lands. A revision portion that straddles the hole is shown as two
+honest stretches rather than one span that would silently include pages you do
+not hold.
+
+**Forwards** simply continues past the end, which already enters each new surah
+at its first page. One tap to switch.
 
 ## The dials
 
@@ -92,6 +102,26 @@ A verse or a hadith with its source and a line of encouragement, drawn from a
 table of 32 (20 ayat, 12 ahadith). It is picked by date, so it is stable all day
 and rotates for over a month before anything repeats.
 
+## Design
+
+Light is warm parchment with deep navy ink; dark is deep navy with warm cream.
+Neither is pure black or pure white — paper and ink rather than screen defaults.
+
+Four accents, each with exactly one job and never swapped:
+
+| | |
+|---|---|
+| navy | structure and primary action |
+| gold | the new page — the light being added |
+| sage | completion |
+| clay | carried over from an earlier day |
+
+Every foreground/background pair is verified against WCAG AA in both modes
+rather than eyeballed. A serif (New York, falling back to Georgia) carries the
+daily verse, the large headings and the numerals; the interface itself stays on
+the system sans. One spring curve is shared by every transition so the whole app
+moves alike.
+
 ## Storage
 
 Postgres via Supabase. Every table is row-level-security'd to `auth.uid()`, so a
@@ -101,8 +131,8 @@ holds one thing: an offline outbox that replays a tick made with no signal.
 | Table | Holds |
 |---|---|
 | `plan_config` | the dials, including the Arabic task |
-| `progress` | memorized range + the two rotation cursors |
-| `daily_tasks` | every generated portion, done state, carry-over origin and flag |
+| `progress` | memorized range, the surah in progress, and the two rotation cursors |
+| `daily_tasks` | every generated portion and its exact pages, done state, carry-over origin and flag |
 | `weekly_review` | the weekly retention log |
 | `inspirations` | the shared daily messages (read-only) |
 | `settings` | reminder time |
@@ -125,15 +155,18 @@ table is the only thing to change.
 
 `npm test` runs both suites.
 
-**Engine (60 assertions, `test/engine.test.js`)** — pure functions, no browser.
+**Engine (74 assertions, `test/engine.test.js`)** — pure functions, no browser.
 Pools and rotation, chunking and wrap-around, that a skipped day resumes rather
 than jumps, that the same state yields the same portion on any weekday, that a
 full rotation covers all 99 manzil pages exactly once and takes the 13 days the
 projection claims, that two lessons a week really produces two new pages a week
-walking backwards one page at a time, that Arabic follows its own days without
-touching the rotation cursors, and that planning never mutates its input.
+that each surah is entered at its first page and finished before the next is
+opened, that the hole left mid-surah is neither counted as held nor papered
+over, that un-ticking the page which closed a gap re-opens it, that Arabic
+follows its own days without touching the rotation cursors, and that planning
+never mutates its input.
 
-**End-to-end (89 assertions, `test/test.cjs`)** — headless Chromium at iPhone
+**End-to-end (102 assertions, `test/test.cjs`)** — headless Chromium at iPhone
 viewport driving the real UI. The database lives in the Node test process, not
 the browser, so the persistence test clears **all** cookies and browser storage,
 reloads, and asserts everything returns — the actual cross-device guarantee.
@@ -143,7 +176,8 @@ ranges and surah names, the daily message being stable across a reload,
 optimistic ticking, carry-over of unfinished work (that finished work is never carried, and that a
 day left half-done still reads as half-done in the heatmap), every planner dial changing the cycle and rebuilding today's
 portion, the preview starting at tomorrow and continuing from where today
-stops, the surah pickers agreeing with the stored range, the heatmap and
+stops, the surah pickers agreeing with the stored range, new pages entering
+Az-Zukhruf at p.489 rather than p.495 and the held count moving with them, the heatmap and
 retention chart, reminder persistence with the permission prompt denied, dark
 mode, no horizontal overflow at 390px, tap targets, and zero console errors.
 

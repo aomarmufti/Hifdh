@@ -1,9 +1,10 @@
 // Engine unit tests. Run with: node test/engine.test.js
 import {
-  DEFAULT_CONFIG, sabqiWindow, manzilPool, takeChunk, nextNewPages,
-  planDay, absorbSabaq, cycleLengthDays, preview
+  DEFAULT_CONFIG, memorizedPages, totalPages, sabqiPages, manzilPages,
+  takeRun, describeRuns, labelForRun, nextNewPages, activeSurah,
+  planDay, absorbSabaq, undoSabaq, cycleLengthDays, preview
 } from '../public/lib/engine.js';
-import { pagesForSurahRange, labelForPages } from '../public/lib/quran.js';
+import { pagesForSurahRange, labelForPages, surahByNumber } from '../public/lib/quran.js';
 
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -12,180 +13,212 @@ const ok = (name, cond, extra = '') => {
 };
 const eq = (name, a, b) => ok(name, JSON.stringify(a) === JSON.stringify(b),
   `got ${JSON.stringify(a)} want ${JSON.stringify(b)}`);
-// Most assertions here are about Qur'an scheduling; Arabic rides alongside it.
-const quran = (r) => r.tasks.filter((t) => t.kind !== 'arabic');
 
-// The user's real starting point: Ad-Dukhan (44) .. An-Nas (114) = pages 496-604
+// The real starting point: Ad-Dukhan (44) .. An-Nas (114) = pages 496-604
 const r = pagesForSurahRange(44, 114);
-const start = { memFrom: r.from, memTo: r.to, sabqiCursor: r.from, manzilCursor: 0 };
+const start = { memFrom: r.from, memTo: r.to, partialFrom: null, partialTo: null,
+                sabqiCursor: r.from, manzilCursor: 0 };
 const cfg = { ...DEFAULT_CONFIG };
+// Most assertions are about Qur'an scheduling; Arabic rides alongside it.
+const quran = (res) => res.tasks.filter((t) => t.kind !== 'arabic');
+const kind = (res, k) => res.tasks.find((t) => t.kind === k);
 
-console.log('\n[pools]');
-eq('sabqi window is the 10 newest pages', sabqiWindow(start, cfg), { from: 496, to: 505 });
-eq('manzil pool is everything older', manzilPool(start, cfg), { from: 506, to: 604 });
-ok('manzil pool is 99 pages', manzilPool(start, cfg).to - manzilPool(start, cfg).from + 1 === 99);
-ok('sabqi window sits at the newest end (backward)', sabqiWindow(start, cfg).from === start.memFrom);
+console.log('\n[what is held]');
+ok('109 pages held', totalPages(start) === 109, String(totalPages(start)));
+eq('the block is contiguous', [memorizedPages(start)[0], memorizedPages(start)[108]], [496, 604]);
+eq('sabqi window is the 10 newest pages', sabqiPages(start, cfg),
+   [496,497,498,499,500,501,502,503,504,505]);
+ok('manzil pool is the other 99', manzilPages(start, cfg).length === 99);
+eq('manzil pool starts after the window', manzilPages(start, cfg)[0], 506);
 
 const fwd = { ...cfg, direction: 'forward' };
-eq('forward: sabqi window is at the far end', sabqiWindow(start, fwd), { from: 595, to: 604 });
-eq('forward: manzil pool is the earlier pages', manzilPool(start, fwd), { from: 496, to: 594 });
+eq('forward: sabqi window is the far end', sabqiPages(start, fwd),
+   [595,596,597,598,599,600,601,602,603,604]);
+eq('forward: manzil pool ends before it', manzilPages(start, fwd).slice(-1), [594]);
+
+console.log('\n[memorizing backwards means surah by surah, each learned forwards]');
+// Having finished Ad-Dukhan you do NOT start at the last page of Az-Zukhruf.
+eq('the next new page is the FIRST page of Az-Zukhruf', nextNewPages(start, cfg),
+   { from: 489, to: 489 });
+ok('which is p489, not p495', nextNewPages(start, cfg).from === surahByNumber(43).page);
+eq('the surah in progress is named', activeSurah(start, cfg).name, 'Az-Zukhruf');
+
+let s = { ...start };
+const order = [];
+for (let i = 0; i < 16; i++) {
+  const np = nextNewPages(s, cfg);
+  if (!np) break;
+  order.push(np.from);
+  s = absorbSabaq(s, cfg, np.from, np.to);
+}
+eq('pages are taken forwards through each surah, surahs descending',
+   order, [489,490,491,492,493,494,495, 483,484,485,486,487,488, 477,478,479]);
+ok('Az-Zukhruf is finished before Ash-Shura is opened',
+   order.indexOf(495) < order.indexOf(483));
+ok('Ash-Shura opens at its own first page',
+   order[7] === surahByNumber(42).page, String(order[7]));
+ok('Fussilat opens at its own first page',
+   order[13] === surahByNumber(41).page, String(order[13]));
+
+console.log('\n[the gap while a surah is in progress]');
+let mid = { ...start };
+for (const p of [489, 490, 491]) mid = absorbSabaq(mid, cfg, p, p);
+eq('the block has not moved yet', [mid.memFrom, mid.memTo], [496, 604]);
+eq('the part-learned surah is tracked separately', [mid.partialFrom, mid.partialTo], [489, 491]);
+ok('112 pages are held', totalPages(mid) === 112, String(totalPages(mid)));
+ok('the unlearned middle of the surah is NOT counted as held',
+   !memorizedPages(mid).includes(492) && !memorizedPages(mid).includes(495));
+eq('the sabqi window straddles the gap', sabqiPages(mid, cfg),
+   [489,490,491,496,497,498,499,500,501,502]);
+eq('and is described as two honest runs, not one false span',
+   describeRuns(sabqiPages(mid, cfg)).map((x) => [x.from, x.to, x.label]),
+   [[489, 491, 'Az-Zukhruf'], [496, 502, 'Ad-Dukhan → Al-Ahqaf']]);
+ok('the label names both', labelForRun(sabqiPages(mid, cfg)) === 'Az-Zukhruf · Ad-Dukhan → Al-Ahqaf',
+   labelForRun(sabqiPages(mid, cfg)));
+
+console.log('\n[closing the gap]');
+let closing = { ...mid };
+for (const p of [492, 493, 494]) closing = absorbSabaq(closing, cfg, p, p);
+ok('still open one page short', closing.partialTo === 494 && closing.memFrom === 496);
+closing = absorbSabaq(closing, cfg, 495, 495);
+eq('the last page of the surah merges the two ranges',
+   [closing.memFrom, closing.memTo, closing.partialFrom, closing.partialTo],
+   [489, 604, null, null]);
+ok('116 pages held, contiguous', totalPages(closing) === 116 &&
+   memorizedPages(closing).length === closing.memTo - closing.memFrom + 1);
+
+console.log('\n[un-ticking a new page]');
+let u = absorbSabaq(start, cfg, 489, 489);
+eq('undo removes the prefix entirely when it was the only page',
+   [undoSabaq(u, cfg, 489, 489).partialFrom, undoSabaq(u, cfg, 489, 489).memFrom],
+   [null, 496]);
+let u2 = { ...mid };                          // partial 489-491
+eq('undo shrinks a longer prefix',
+   [undoSabaq(u2, cfg, 491, 491).partialFrom, undoSabaq(u2, cfg, 491, 491).partialTo],
+   [489, 490]);
+const merged = absorbSabaq({ ...mid, partialTo: 494 }, cfg, 495, 495);
+eq('the merge happened', [merged.memFrom, merged.partialFrom], [489, null]);
+const reopened = undoSabaq(merged, cfg, 495, 495);
+eq('undoing the page that closed the gap re-opens it',
+   [reopened.memFrom, reopened.partialFrom, reopened.partialTo], [496, 489, 494]);
+ok('and the page count goes back down',
+   totalPages(reopened) === totalPages({ ...mid, partialTo: 494 }),
+   `${totalPages(reopened)} vs ${totalPages({ ...mid, partialTo: 494 })}`);
+eq('forward undo just steps the block back',
+   undoSabaq({ ...start, memTo: 605 }, fwd, 605, 605).memTo, 604);
 
 console.log('\n[chunking]');
-eq('takes a chunk from the cursor', takeChunk({ from: 506, to: 604 }, 506, 8),
-   { from: 506, to: 513, nextCursor: 514, completesCycle: false });
-eq('clamps at the pool end rather than straddling',
-   takeChunk({ from: 506, to: 604 }, 600, 8),
-   { from: 600, to: 604, nextCursor: 506, completesCycle: true });
+eq('takes a chunk from the cursor',
+   takeRun([506,507,508,509,510], 506, 3),
+   { pages: [506,507,508], from: 506, to: 508, nextCursor: 509, completesCycle: false });
+eq('stops at the end of the pool rather than wrapping mid-chunk',
+   takeRun([506,507,508], 507, 9),
+   { pages: [507,508], from: 507, to: 508, nextCursor: 506, completesCycle: true });
 eq('a cursor outside the pool restarts it',
-   takeChunk({ from: 506, to: 604 }, 999, 8),
-   { from: 506, to: 513, nextCursor: 514, completesCycle: false });
-ok('no pool means no chunk', takeChunk(null, 1, 8) === null);
-ok('zero pages per day means no chunk', takeChunk({ from: 1, to: 10 }, 1, 0) === null);
-
-console.log('\n[new pages]');
-eq('backward: next new page is the one before the range', nextNewPages(start, cfg),
-   { from: 495, to: 495 });
-ok('backward next page is the end of Az-Zukhruf', labelForPages(495, 495) === 'Az-Zukhruf',
-   labelForPages(495, 495));
-eq('two new pages per lesson', nextNewPages(start, { ...cfg, newPagesPerLesson: 2 }),
-   { from: 494, to: 495 });
-eq('forward: next new page follows the range',
-   nextNewPages({ ...start, memTo: 500 }, fwd), { from: 501, to: 501 });
-ok('nothing left to memorize backward from page 1',
-   nextNewPages({ ...start, memFrom: 1 }, cfg) === null);
+   takeRun([506,507,508], 999, 2),
+   { pages: [506,507], from: 506, to: 507, nextCursor: 508, completesCycle: false });
+ok('an empty pool yields nothing', takeRun([], 1, 8) === null);
+ok('zero pages a day yields nothing', takeRun([1,2,3], 1, 0) === null);
 
 console.log('\n[a single day]');
-const mon = planDay(start, cfg, 1);   // Monday = lesson day
-ok('Monday has three Qur\u2019an tasks', quran(mon).length === 3, String(quran(mon).length));
+const mon = planDay(start, cfg, 1);     // Monday = lesson day
 eq('Monday kinds', quran(mon).map((t) => t.kind), ['sabaq', 'sabqi', 'manzil']);
-eq('Monday sabaq is the new page', [mon.tasks[0].from, mon.tasks[0].to], [495, 495]);
-eq('Monday manzil starts the rotation', [mon.tasks[2].from, mon.tasks[2].to], [506, 513]);
-
-const tue = planDay(start, cfg, 2);   // Tuesday = not a lesson day
-eq('Tuesday has no sabaq', quran(tue).map((t) => t.kind), ['sabqi', 'manzil']);
-
-const rest = planDay(start, { ...cfg, restDays: [6] }, 6);
-eq('a rest day schedules no Qur\u2019an work', quran(rest), []);
-const restLesson = planDay(start, { ...cfg, restDays: [1] }, 1);
+eq('Monday sabaq is Az-Zukhruf p489', [kind(mon, 'sabaq').from, kind(mon, 'sabaq').label],
+   [489, 'Az-Zukhruf']);
+eq('Monday manzil opens the rotation', [kind(mon, 'manzil').from, kind(mon, 'manzil').to],
+   [506, 513]);
+eq('Tuesday has no sabaq', quran(planDay(start, cfg, 2)).map((t) => t.kind), ['sabqi', 'manzil']);
+eq('a rest day schedules no Qur’an work', quran(planDay(start, { ...cfg, restDays: [6] }, 6)), []);
 eq('a rest day that is also a lesson day still gets the lesson',
-   quran(restLesson).map((t) => t.kind), ['sabaq']);
+   quran(planDay(start, { ...cfg, restDays: [1] }, 1)).map((t) => t.kind), ['sabaq']);
 
 console.log('\n[the cursor is the memory - missing a day cannot desync]');
-let s = { ...start };
-const d1 = planDay(s, cfg, 2); s = d1.next;
-const d2 = planDay(s, cfg, 3); s = d2.next;
-eq('day 1 manzil', [d1.tasks[1].from, d1.tasks[1].to], [506, 513]);
-eq('day 2 manzil continues where day 1 stopped', [d2.tasks[1].from, d2.tasks[1].to], [514, 521]);
-// Two days have been planned, so the cursor sits at 522. Now let any number of
-// calendar days pass without planning: the rotation must resume at 522, never
-// skip ahead to "where it would have been". Friday is a lesson day, so select
-// the manzil task by kind rather than by position.
-const man = (r) => r.tasks.find((t) => t.kind === 'manzil');
-eq('after skipping days the rotation resumes where it stopped',
-   [man(planDay(s, cfg, 5)).from, man(planDay(s, cfg, 5)).to], [522, 529]);
+let c1 = planDay(start, cfg, 2); let st = c1.next;
+let c2 = planDay(st, cfg, 3);    st = c2.next;
+eq('day 1 manzil', [kind(c1, 'manzil').from, kind(c1, 'manzil').to], [506, 513]);
+eq('day 2 continues from it', [kind(c2, 'manzil').from, kind(c2, 'manzil').to], [514, 521]);
+const man = (res) => [kind(res, 'manzil').from, kind(res, 'manzil').to];
+eq('after skipping days it resumes where it stopped', man(planDay(st, cfg, 5)), [522, 529]);
 eq('the same state gives the same portion on any weekday',
-   [3, 4, 6, 7].map((wd) => [man(planDay(s, cfg, wd)).from, man(planDay(s, cfg, wd)).to]),
-   [[522, 529], [522, 529], [522, 529], [522, 529]]);
-ok('a skipped day costs nothing but time - no pages are lost',
-   man(planDay(s, cfg, 5)).from === d2.next.manzilCursor);
+   [3,4,6,7].map((wd) => man(planDay(st, cfg, wd))),
+   [[522,529],[522,529],[522,529],[522,529]]);
 
-console.log('\n[memorizing a new page shifts the pools]');
-let s2 = absorbSabaq(start, cfg, 495, 495);
-ok('memorized range grew by one page', s2.memFrom === 495, String(s2.memFrom));
-eq('sabqi window slid to include the new page', sabqiWindow(s2, cfg), { from: 495, to: 504 });
-eq('manzil pool grew at its near edge', manzilPool(s2, cfg), { from: 505, to: 604 });
-ok('total memorized is now 110 pages', s2.memTo - s2.memFrom + 1 === 110);
-const s3 = absorbSabaq({ ...start, sabqiCursor: 505 }, cfg, 495, 495);
-ok('a cursor left outside its pool is re-seated', s3.sabqiCursor === 495, String(s3.sabqiCursor));
-
-console.log('\n[full rotation completes and restarts]');
-let st = { ...start }, seen = new Set(), days = 0, cycled = false;
+console.log('\n[a full rotation covers everything exactly once]');
+let rot = { ...start }, seen = [], days = 0, cycled = false;
 while (days < 400 && !cycled) {
-  const r = planDay(st, cfg, ((days % 7) + 1));
-  for (const t of r.tasks) {
-    if (t.kind === 'manzil') {
-      for (let p = t.from; p <= t.to; p++) seen.add(p);
-      if (t.completesCycle) cycled = true;
-    }
-  }
-  st = r.next; days++;
+  const res = planDay(rot, cfg, (days % 7) + 1);
+  const m = kind(res, 'manzil');
+  if (m) { seen.push(...m.pages); if (m.completesCycle) cycled = true; }
+  rot = res.next; days++;
 }
 ok('the rotation completes', cycled);
-ok('every page of the manzil pool was covered exactly once per cycle',
-   seen.size === 99, String(seen.size));
-ok('no page outside the pool was scheduled',
-   [...seen].every((p) => p >= 506 && p <= 604));
-ok('cycle took 13 days at 8 pages/day', days === 13, String(days));
+ok('99 pages covered', seen.length === 99, String(seen.length));
+ok('no page seen twice', new Set(seen).size === seen.length);
+ok('nothing outside the pool', seen.every((p) => p >= 506 && p <= 604));
+ok('it took 13 days at 8 pages a day', days === 13, String(days));
 
-console.log('\n[cycle projection matches reality]');
-const proj = cycleLengthDays(start, cfg);
-ok('projected revision days matches the simulation', proj.revisionDays === 13,
-   JSON.stringify(proj));
-const proj4 = cycleLengthDays(start, { ...cfg, manzilPagesPerDay: 4 });
-ok('halving the daily pages roughly doubles the cycle', proj4.revisionDays === 25,
-   JSON.stringify(proj4));
-const projRest = cycleLengthDays(start, { ...cfg, restDays: [6, 7] });
-ok('rest days stretch the calendar length but not the work',
-   projRest.revisionDays === 13 && projRest.calendarDays > 13, JSON.stringify(projRest));
+console.log('\n[cycle projection matches the simulation]');
+ok('projected 13 days', cycleLengthDays(start, cfg).revisionDays === 13,
+   JSON.stringify(cycleLengthDays(start, cfg)));
+ok('halving the daily pages roughly doubles it',
+   cycleLengthDays(start, { ...cfg, manzilPagesPerDay: 4 }).revisionDays === 25);
+const withRest = cycleLengthDays(start, { ...cfg, restDays: [6, 7] });
+ok('rest days stretch the calendar, not the work',
+   withRest.revisionDays === 13 && withRest.calendarDays > 13, JSON.stringify(withRest));
 
-console.log('\n[two lessons a week really is two pages a week]');
+console.log('\n[two lessons a week is two new pages a week]');
 const wk = preview(start, cfg, 1, 14);
-const newPages = wk.flatMap((d) => d.tasks.filter((t) => t.kind === 'sabaq'));
-ok('14 days contains 4 lessons', newPages.length === 4, String(newPages.length));
-ok('lessons land on Monday and Friday only',
-   wk.every((d) => !d.tasks.some((t) => t.kind === 'sabaq') || [1, 5].includes(d.isoWeekday)));
-eq('consecutive new pages walk backwards one at a time',
-   newPages.map((t) => t.from), [495, 494, 493, 492]);
+const fresh = wk.flatMap((d) => d.tasks.filter((t) => t.kind === 'sabaq'));
+ok('14 days holds 4 lessons', fresh.length === 4, String(fresh.length));
+ok('only on Monday and Friday',
+   wk.every((d) => !d.tasks.some((t) => t.kind === 'sabaq') || [1,5].includes(d.isoWeekday)));
+eq('and they walk forwards through Az-Zukhruf', fresh.map((t) => t.from), [489, 490, 491, 492]);
 
-console.log('\n[settings actually change the plan]');
-const heavy = preview(start, { ...cfg, manzilPagesPerDay: 20 }, 1, 1)[0];
+console.log('\n[settings change the plan]');
 eq('20 pages a day gives a 20-page portion',
-   heavy.tasks.filter((t) => t.kind === 'manzil').map((t) => t.to - t.from + 1), [20]);
+   kind(planDay(start, { ...cfg, manzilPagesPerDay: 20 }, 2), 'manzil').pages.length, 20);
 const noSabqi = planDay(start, { ...cfg, sabqiWindowPages: 0 }, 2);
 eq('no sabqi window means manzil covers everything',
    quran(noSabqi).map((t) => t.kind), ['manzil']);
-eq('and it starts from the very first memorized page',
-   [quran(noSabqi)[0].from], [496]);
-
-console.log('\n[edge cases]');
-const tiny = { memFrom: 604, memTo: 604, sabqiCursor: 604, manzilCursor: 604 };
-const tinyDay = planDay(tiny, cfg, 2);
-ok('a single memorized page still schedules something', quran(tinyDay).length >= 1);
-ok('one page: nothing is older, so there is no manzil',
-   !tinyDay.tasks.some((t) => t.kind === 'manzil'));
-ok('manzilPool is null when everything fits in the sabqi window',
-   manzilPool(tiny, cfg) === null);
-const allNew = planDay(start, { ...cfg, sabqiWindowPages: 999 }, 2);
-ok('an oversized sabqi window clamps to what is memorized',
-   sabqiWindow(start, { ...cfg, sabqiWindowPages: 999 }).to === 604);
-ok('and leaves no manzil pool', !allNew.tasks.some((t) => t.kind === 'manzil'));
+eq('starting at the very first page held', kind(noSabqi, 'manzil').from, 496);
 
 console.log('\n[arabic]');
 const ar = { ...cfg, arabicText: 'Madinah Book 2, lesson 7' };
-const arDay = planDay(start, ar, 2);
-ok('arabic is scheduled alongside the Qur\u2019an work',
-   arDay.tasks.some((t) => t.kind === 'arabic'));
-eq('arabic carries the text you set',
-   arDay.tasks.find((t) => t.kind === 'arabic').label, 'Madinah Book 2, lesson 7');
-eq('arabic carries no page range',
-   [arDay.tasks.find((t) => t.kind === 'arabic').from,
-    arDay.tasks.find((t) => t.kind === 'arabic').to], [0, 0]);
-ok('blank arabic text falls back to a sensible label',
-   planDay(start, cfg, 2).tasks.find((t) => t.kind === 'arabic').label === 'Arabic study');
+eq('arabic carries the text you set', kind(planDay(start, ar, 2), 'arabic').label,
+   'Madinah Book 2, lesson 7');
+eq('and no page range', kind(planDay(start, ar, 2), 'arabic').pages, []);
+ok('blank text falls back', kind(planDay(start, cfg, 2), 'arabic').label === 'Arabic study');
 ok('arabic can be switched off',
-   !planDay(start, { ...ar, arabicEnabled: false }, 2).tasks.some((t) => t.kind === 'arabic'));
-eq('arabic follows its own days, not lesson days',
+   !kind(planDay(start, { ...ar, arabicEnabled: false }, 2), 'arabic'));
+eq('arabic follows its own days',
    planDay(start, { ...ar, arabicDays: [1,2,3,4,5] }, 7).tasks.map((t) => t.kind),
    ['sabqi', 'manzil']);
-ok('a Qur\u2019an rest day can still be an arabic day',
-   planDay(start, { ...ar, restDays: [6] }, 6).tasks.map((t) => t.kind).join(',') === 'arabic');
-ok('arabic never touches the rotation cursors',
+ok('a Qur’an rest day can still be an arabic day',
+   planDay(start, { ...ar, restDays: [6] }, 6).tasks.map((t) => t.kind).join() === 'arabic');
+ok('arabic never moves the rotation cursors',
    planDay(start, ar, 2).next.manzilCursor === planDay(start, cfg, 2).next.manzilCursor);
 
+console.log('\n[edge cases]');
+const one = { memFrom: 604, memTo: 604, partialFrom: null, partialTo: null,
+              sabqiCursor: 604, manzilCursor: 604 };
+ok('a single page still schedules something', quran(planDay(one, cfg, 2)).length >= 1);
+ok('one page: nothing is older, so no manzil', !kind(planDay(one, cfg, 2), 'manzil'));
+ok('an oversized sabqi window clamps to what is held',
+   sabqiPages(start, { ...cfg, sabqiWindowPages: 999 }).length === 109);
+ok('and leaves no manzil pool',
+   manzilPages(start, { ...cfg, sabqiWindowPages: 999 }).length === 0);
+ok('nothing left to memorize at page 1',
+   nextNewPages({ ...start, memFrom: 1 }, cfg) === null);
+ok('forward direction still walks pages up',
+   nextNewPages({ ...start, memTo: 500 }, fwd).from === 501);
+ok('forward stops at the end of the mushaf',
+   nextNewPages({ ...start, memTo: 604 }, fwd) === null);
+
 console.log('\n[purity]');
-const frozen = { memFrom: 496, memTo: 604, sabqiCursor: 496, manzilCursor: 506 };
+const frozen = { memFrom: 496, memTo: 604, partialFrom: 489, partialTo: 491,
+                 sabqiCursor: 496, manzilCursor: 506 };
 const copy = JSON.parse(JSON.stringify(frozen));
-planDay(frozen, cfg, 1); absorbSabaq(frozen, cfg, 495, 495); preview(frozen, cfg, 1, 10);
+planDay(frozen, cfg, 1); absorbSabaq(frozen, cfg, 492, 492); preview(frozen, cfg, 1, 10);
 eq('planning never mutates the state it is given', frozen, copy);
 
 console.log(`\n=== engine: ${pass} passed, ${fail} failed ===`);
