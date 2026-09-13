@@ -451,9 +451,13 @@ function currentSurahRange() {
 }
 
 function renderPreview() {
-  const rows = preview(state.progress, state.config, isoDay(), 7);
+  // The stored cursors have already advanced past today's portion, so a preview
+  // from here begins with tomorrow. Today is on the Today tab; labelling this
+  // row "Today" would show tomorrow's pages under today's name.
+  const tomorrow = isoDay() === 7 ? 1 : isoDay() + 1;
+  const rows = preview(state.progress, state.config, tomorrow, 7);
   $('preview').innerHTML = rows.map((d, i) => {
-    const name = i === 0 ? 'Today' : DAYS_LONG[d.isoWeekday - 1];
+    const name = i === 0 ? 'Tomorrow' : DAYS_LONG[d.isoWeekday - 1];
     const lesson = d.tasks.some((t) => t.kind === 'sabaq');
     const quran = d.tasks.filter((t) => t.kind !== 'arabic');
     if (!d.tasks.length) {

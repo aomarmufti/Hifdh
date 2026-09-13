@@ -188,6 +188,21 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
   ok('a 7-day preview is rendered', (await page.locator('.pv').count()) === 7);
   ok('preview names surahs', /[A-Z][a-z]+-?/.test(pv0));
 
+  // The cursors have already advanced past today, so the preview starts at
+  // tomorrow - and its first manzil portion must continue from today's.
+  ok('the preview starts at tomorrow, not today',
+     (await page.locator('.pv-day').first().textContent()).includes('Tomorrow'),
+     await page.locator('.pv-day').first().textContent());
+  db = await api('dump');
+  const todayManzil = db.daily_tasks.find(
+    (t) => t.task_date === key() && t.kind === 'manzil' && !t.carried_from);
+  const firstPv = await page.locator('.pv').first().textContent();
+  ok('tomorrow continues from where today stops',
+     firstPv.includes('p.' + (todayManzil.page_to + 1)),
+     `today ends p.${todayManzil.page_to}; preview says ${firstPv.replace(/\s+/g,' ').slice(0,110)}`);
+  ok('and does not repeat today\u2019s pages',
+     !firstPv.includes('p.' + todayManzil.page_from + '–'), firstPv.slice(0,110));
+
   // Raise manzil pages/day and the cycle must shorten.
   for (let i = 0; i < 4; i++) {
     await page.click('.stepper[data-key="manzil_pages_per_day"] [data-d="1"]');

@@ -74,7 +74,8 @@ have not already done it:
 - Arabic: on/off, what you are studying, and which days
 
 A seven-day preview under the dials shows exactly what the change produces
-before it becomes history.
+before it becomes history. It runs from tomorrow: today's portion is already
+fixed and sits on the Today tab.
 
 ## Screens
 
@@ -132,7 +133,7 @@ projection claims, that two lessons a week really produces two new pages a week
 walking backwards one page at a time, that Arabic follows its own days without
 touching the rotation cursors, and that planning never mutates its input.
 
-**End-to-end (86 assertions, `test/test.cjs`)** — headless Chromium at iPhone
+**End-to-end (89 assertions, `test/test.cjs`)** — headless Chromium at iPhone
 viewport driving the real UI. The database lives in the Node test process, not
 the browser, so the persistence test clears **all** cookies and browser storage,
 reloads, and asserts everything returns — the actual cross-device guarantee.
@@ -141,7 +142,8 @@ Covered: first-run setup, that today's portions are computed with the right page
 ranges and surah names, the daily message being stable across a reload,
 optimistic ticking, carry-over of unfinished work (that finished work is never carried, and that a
 day left half-done still reads as half-done in the heatmap), every planner dial changing the cycle and rebuilding today's
-portion, the surah pickers agreeing with the stored range, the heatmap and
+portion, the preview starting at tomorrow and continuing from where today
+stops, the surah pickers agreeing with the stored range, the heatmap and
 retention chart, reminder persistence with the permission prompt denied, dark
 mode, no horizontal overflow at 390px, tap targets, and zero console errors.
 
