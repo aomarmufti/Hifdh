@@ -28,6 +28,10 @@ derived. It splits your pages three ways, the classical division:
 | **Sabqi** | your most recent pages, still being strengthened | every day, short cycle |
 | **Manzil** | everything older | every day, long rotation |
 
+Arabic rides alongside as a standing daily task: it has no page model, so you
+set the text ("Madinah Book 2, lesson 7") and which days it runs. It can be
+switched off, and a Qur'an rest day can still be an Arabic day.
+
 Each day it hands you a specific page range with surah names. The manzil
 rotation walks the whole pool and starts again, so the Plan screen can tell you
 *"everything every 13 days"* — and that number moves when you move the dials.
@@ -62,6 +66,7 @@ have not already done it:
 - manzil pages a day — the main lever on cycle length
 - sabqi pages a day, and how many recent pages stay in the sabqi window
 - rest days
+- Arabic: on/off, what you are studying, and which days
 
 A seven-day preview under the dials shows exactly what the change produces
 before it becomes history.
@@ -89,7 +94,7 @@ holds one thing: an offline outbox that replays a tick made with no signal.
 
 | Table | Holds |
 |---|---|
-| `plan_config` | the dials |
+| `plan_config` | the dials, including the Arabic task |
 | `progress` | memorized range + the two rotation cursors |
 | `daily_tasks` | every generated portion, done state, carry-over origin |
 | `weekly_review` | the weekly retention log |
@@ -114,14 +119,15 @@ table is the only thing to change.
 
 `npm test` runs both suites.
 
-**Engine (52 assertions, `test/engine.test.js`)** — pure functions, no browser.
+**Engine (60 assertions, `test/engine.test.js`)** — pure functions, no browser.
 Pools and rotation, chunking and wrap-around, that a skipped day resumes rather
 than jumps, that the same state yields the same portion on any weekday, that a
 full rotation covers all 99 manzil pages exactly once and takes the 13 days the
 projection claims, that two lessons a week really produces two new pages a week
-walking backwards one page at a time, and that planning never mutates its input.
+walking backwards one page at a time, that Arabic follows its own days without
+touching the rotation cursors, and that planning never mutates its input.
 
-**End-to-end (71 assertions, `test/test.cjs`)** — headless Chromium at iPhone
+**End-to-end (78 assertions, `test/test.cjs`)** — headless Chromium at iPhone
 viewport driving the real UI. The database lives in the Node test process, not
 the browser, so the persistence test clears **all** cookies and browser storage,
 reloads, and asserts everything returns — the actual cross-device guarantee.

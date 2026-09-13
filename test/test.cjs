@@ -191,6 +191,37 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
   await page.selectOption('#p-from', '44');
   await page.waitForTimeout(700);
 
+  /* ─────────── 6b. arabic ─────────── */
+  console.log('\n[6b] Arabic');
+  await page.fill('#p-arabic-text', 'Madinah Book 2, lesson 7 (idafah)');
+  await page.waitForTimeout(1700);
+  db = await api('dump');
+  ok('arabic text saved', db.plan_config[0].arabic_text.includes('idafah'),
+     db.plan_config[0].arabic_text);
+  const arToday = db.daily_tasks.filter((t) => t.task_date === key() && t.kind === 'arabic');
+  ok('an arabic task exists for today', arToday.length === 1, String(arToday.length));
+  ok('it carries the text', arToday[0] && arToday[0].label.includes('idafah'),
+     arToday[0] && arToday[0].label);
+
+  await page.click('[data-view="today"]');
+  await page.waitForTimeout(250);
+  const tTxt = await page.textContent('#tasks');
+  ok('arabic shows on Today', tTxt.includes('idafah'), tTxt.slice(0, 240));
+  ok('arabic shows no page range',
+     !/idafah[\s\S]{0,40}p\./.test(tTxt), tTxt.slice(0, 240));
+
+  await page.click('[data-view="plan"]');
+  await page.waitForTimeout(200);
+  await page.uncheck('#p-arabic-on');
+  await page.waitForTimeout(1200);
+  db = await api('dump');
+  ok('arabic can be switched off', db.plan_config[0].arabic_enabled === false,
+     String(db.plan_config[0].arabic_enabled));
+  ok('and today\u2019s arabic task is removed',
+     db.daily_tasks.filter((t) => t.task_date === key() && t.kind === 'arabic').length === 0);
+  await page.check('#p-arabic-on');
+  await page.waitForTimeout(1200);
+
   /* ─────────── 7. direction ─────────── */
   console.log('\n[7] Memorizing direction');
   await page.click('#p-direction [data-v="forward"]');

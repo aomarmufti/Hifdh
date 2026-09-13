@@ -336,6 +336,7 @@ main {
   background: var(--accent-sf); padding: 3px 8px; border-radius: 6px;
 }
 .kind.k-sabaq { color: var(--amber); background: var(--amber-sf); }
+.kind.k-arabic { color: var(--ink-2); background: var(--bg-2); }
 .chip {
   font-size: 11px; font-weight: 600; color: var(--amber);
   background: var(--amber-sf); padding: 3px 8px; border-radius: 6px;
@@ -464,3 +465,22 @@ main {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* ---------- switch ---------- */
+.switch { position: relative; display: inline-block; width: 51px; height: 31px; flex: none; }
+/* The input covers the whole switch: a real tap target, and still focusable. */
+.switch input {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  margin: 0; opacity: 0; z-index: 1; cursor: pointer;
+}
+.switch span {
+  position: absolute; inset: 0; background: var(--line-2); border-radius: 999px;
+  transition: background .25s var(--ease);
+}
+.switch span::before {
+  content: ''; position: absolute; width: 27px; height: 27px; left: 2px; top: 2px;
+  background: #fff; border-radius: 50%; box-shadow: 0 2px 5px rgba(0,0,0,.2);
+  transition: transform .25s var(--ease);
+}
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::before { transform: translateX(20px); }

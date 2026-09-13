@@ -105,7 +105,10 @@ const cfgFromRow = (r) => ({
   sabqiWindowPages: r.sabqi_window_pages,
   sabqiPagesPerDay: r.sabqi_pages_per_day,
   manzilPagesPerDay: r.manzil_pages_per_day,
-  restDays: r.rest_days || []
+  restDays: r.rest_days || [],
+  arabicEnabled: r.arabic_enabled !== false,
+  arabicText: r.arabic_text || '',
+  arabicDays: r.arabic_days || [1,2,3,4,5,6,7]
 });
 const cfgToRow = (c) => ({
   user_id: state.user.id,
@@ -116,6 +119,9 @@ const cfgToRow = (c) => ({
   sabqi_pages_per_day: c.sabqiPagesPerDay,
   manzil_pages_per_day: c.manzilPagesPerDay,
   rest_days: c.restDays,
+  arabic_enabled: c.arabicEnabled,
+  arabic_text: c.arabicText,
+  arabic_days: c.arabicDays,
   updated_at: new Date().toISOString()
 });
 const progToRow = (p) => ({
@@ -277,7 +283,7 @@ function renderToday() {
   } else { $('inspire').hidden = true; }
 
   // Ring: pages remaining today.
-  const pagesOf = (t) => t.page_to - t.page_from + 1;
+  const pagesOf = (t) => (t.kind === 'arabic' ? 0 : t.page_to - t.page_from + 1);
   const total = state.tasks.reduce((a, t) => a + pagesOf(t), 0);
   const left  = state.tasks.filter((t) => !t.done).reduce((a, t) => a + pagesOf(t), 0);
   const frac  = total ? (total - left) / total : 0;
@@ -295,14 +301,16 @@ function renderToday() {
   const KIND = {
     sabaq:  { label: 'New page', cls: 'k-sabaq' },
     sabqi:  { label: 'Sabqi',    cls: 'k-sabqi' },
-    manzil: { label: 'Manzil',   cls: 'k-manzil' }
+    manzil: { label: 'Manzil',   cls: 'k-manzil' },
+    arabic: { label: 'Arabic',   cls: 'k-arabic' }
   };
-  const order = { sabaq: 0, sabqi: 1, manzil: 2 };
+  const order = { sabaq: 0, sabqi: 1, manzil: 2, arabic: 3 };
   const sorted = [...state.tasks].sort((a,b) => order[a.kind] - order[b.kind]);
 
   $('tasks').innerHTML = sorted.map((t) => {
     const k = KIND[t.kind];
     const pages = t.page_to - t.page_from + 1;
+    const isPaged = t.kind !== 'arabic';
     const range = t.page_from === t.page_to ? `p.${t.page_from}` : `p.${t.page_from}–${t.page_to}`;
     const carried = t.carried_from
       ? `<span class="chip">From ${DAYS_SHORT[isoDay(parseKey(t.carried_from))-1]}</span>` : '';
@@ -313,7 +321,7 @@ function renderToday() {
         <span>
           <span class="task-top"><span class="kind ${k.cls}">${k.label}</span>${carried}</span>
           <span class="task-name">${esc(t.label)}</span>
-          <span class="task-meta">${range} · ${pages} page${pages>1?'s':''}</span>
+          ${isPaged ? `<span class="task-meta">${range} · ${pages} page${pages>1?'s':''}</span>` : ''}
         </span>
       </button>`;
   }).join('');
@@ -400,6 +408,14 @@ function renderPlan() {
     $('v-' + key).textContent = c[camel(key)];
   }
 
+  $('p-arabic-on').checked = c.arabicEnabled;
+  $('p-arabic-text').value = c.arabicText;
+  dayButtons($('p-arabic-days'), c.arabicDays, (d) => {
+    c.arabicDays = c.arabicDays.includes(d)
+      ? c.arabicDays.filter((x) => x !== d) : [...c.arabicDays, d].sort();
+    commitPlan();
+  });
+
   // Headline: what this configuration actually means.
   const cyc = cycleLengthDays(p, c);
   const held = p.memTo - p.memFrom + 1;
@@ -427,18 +443,21 @@ function renderPreview() {
   $('preview').innerHTML = rows.map((d, i) => {
     const name = i === 0 ? 'Today' : DAYS_LONG[d.isoWeekday - 1];
     const lesson = d.tasks.some((t) => t.kind === 'sabaq');
+    const quran = d.tasks.filter((t) => t.kind !== 'arabic');
     if (!d.tasks.length) {
       return `<div class="pv"><div class="pv-day">${name}</div>
               <div class="pv-rest">Rest day</div></div>`;
     }
     const lines = d.tasks.map((t) => {
-      const range = t.from === t.to ? `p.${t.from}` : `p.${t.from}–${t.to}`;
       const kind = t.kind === 'sabaq' ? 'New' : t.kind;
+      const range = t.kind === 'arabic' ? ''
+        : ` · ${t.from === t.to ? `p.${t.from}` : `p.${t.from}–${t.to}`}`;
       return `<div class="pv-line"><span class="pv-k">${kind}</span>
                 <span><span class="pv-t">${esc(t.label)}</span>
-                <span class="pv-p"> · ${range}</span></span></div>`;
+                <span class="pv-p">${range}</span></span></div>`;
     }).join('');
-    return `<div class="pv"><div class="pv-day ${lesson?'is-lesson':''}">${name}${lesson?' · Lesson':''}</div>${lines}</div>`;
+    const rest = !quran.length ? '<div class="pv-rest">Qur\u2019an rest day</div>' : '';
+    return `<div class="pv"><div class="pv-day ${lesson?'is-lesson':''}">${name}${lesson?' · Lesson':''}</div>${rest}${lines}</div>`;
   }).join('');
 }
 
@@ -453,6 +472,17 @@ async function commitPlan() {
     if (state.view === 'today') renderToday();
   }, 400);
 }
+
+$('p-arabic-on').addEventListener('change', (e) => {
+  state.config.arabicEnabled = e.target.checked;
+  commitPlan();
+});
+let arabicT;
+$('p-arabic-text').addEventListener('input', (e) => {
+  state.config.arabicText = e.target.value;
+  clearTimeout(arabicT);
+  arabicT = setTimeout(() => commitPlan(), 500);
+});
 
 $('p-direction').addEventListener('click', (e) => {
   const b = e.target.closest('[data-v]');

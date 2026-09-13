@@ -12,6 +12,8 @@ const ok = (name, cond, extra = '') => {
 };
 const eq = (name, a, b) => ok(name, JSON.stringify(a) === JSON.stringify(b),
   `got ${JSON.stringify(a)} want ${JSON.stringify(b)}`);
+// Most assertions here are about Qur'an scheduling; Arabic rides alongside it.
+const quran = (r) => r.tasks.filter((t) => t.kind !== 'arabic');
 
 // The user's real starting point: Ad-Dukhan (44) .. An-Nas (114) = pages 496-604
 const r = pagesForSurahRange(44, 114);
@@ -54,19 +56,19 @@ ok('nothing left to memorize backward from page 1',
 
 console.log('\n[a single day]');
 const mon = planDay(start, cfg, 1);   // Monday = lesson day
-ok('Monday has three tasks', mon.tasks.length === 3, String(mon.tasks.length));
-eq('Monday kinds', mon.tasks.map((t) => t.kind), ['sabaq', 'sabqi', 'manzil']);
+ok('Monday has three Qur\u2019an tasks', quran(mon).length === 3, String(quran(mon).length));
+eq('Monday kinds', quran(mon).map((t) => t.kind), ['sabaq', 'sabqi', 'manzil']);
 eq('Monday sabaq is the new page', [mon.tasks[0].from, mon.tasks[0].to], [495, 495]);
 eq('Monday manzil starts the rotation', [mon.tasks[2].from, mon.tasks[2].to], [506, 513]);
 
 const tue = planDay(start, cfg, 2);   // Tuesday = not a lesson day
-eq('Tuesday has no sabaq', tue.tasks.map((t) => t.kind), ['sabqi', 'manzil']);
+eq('Tuesday has no sabaq', quran(tue).map((t) => t.kind), ['sabqi', 'manzil']);
 
 const rest = planDay(start, { ...cfg, restDays: [6] }, 6);
-eq('a rest day schedules nothing', rest.tasks, []);
+eq('a rest day schedules no Qur\u2019an work', quran(rest), []);
 const restLesson = planDay(start, { ...cfg, restDays: [1] }, 1);
 eq('a rest day that is also a lesson day still gets the lesson',
-   restLesson.tasks.map((t) => t.kind), ['sabaq']);
+   quran(restLesson).map((t) => t.kind), ['sabaq']);
 
 console.log('\n[the cursor is the memory - missing a day cannot desync]');
 let s = { ...start };
@@ -141,14 +143,14 @@ eq('20 pages a day gives a 20-page portion',
    heavy.tasks.filter((t) => t.kind === 'manzil').map((t) => t.to - t.from + 1), [20]);
 const noSabqi = planDay(start, { ...cfg, sabqiWindowPages: 0 }, 2);
 eq('no sabqi window means manzil covers everything',
-   noSabqi.tasks.map((t) => t.kind), ['manzil']);
+   quran(noSabqi).map((t) => t.kind), ['manzil']);
 eq('and it starts from the very first memorized page',
-   [noSabqi.tasks[0].from], [496]);
+   [quran(noSabqi)[0].from], [496]);
 
 console.log('\n[edge cases]');
 const tiny = { memFrom: 604, memTo: 604, sabqiCursor: 604, manzilCursor: 604 };
 const tinyDay = planDay(tiny, cfg, 2);
-ok('a single memorized page still schedules something', tinyDay.tasks.length >= 1);
+ok('a single memorized page still schedules something', quran(tinyDay).length >= 1);
 ok('one page: nothing is older, so there is no manzil',
    !tinyDay.tasks.some((t) => t.kind === 'manzil'));
 ok('manzilPool is null when everything fits in the sabqi window',
@@ -157,6 +159,28 @@ const allNew = planDay(start, { ...cfg, sabqiWindowPages: 999 }, 2);
 ok('an oversized sabqi window clamps to what is memorized',
    sabqiWindow(start, { ...cfg, sabqiWindowPages: 999 }).to === 604);
 ok('and leaves no manzil pool', !allNew.tasks.some((t) => t.kind === 'manzil'));
+
+console.log('\n[arabic]');
+const ar = { ...cfg, arabicText: 'Madinah Book 2, lesson 7' };
+const arDay = planDay(start, ar, 2);
+ok('arabic is scheduled alongside the Qur\u2019an work',
+   arDay.tasks.some((t) => t.kind === 'arabic'));
+eq('arabic carries the text you set',
+   arDay.tasks.find((t) => t.kind === 'arabic').label, 'Madinah Book 2, lesson 7');
+eq('arabic carries no page range',
+   [arDay.tasks.find((t) => t.kind === 'arabic').from,
+    arDay.tasks.find((t) => t.kind === 'arabic').to], [0, 0]);
+ok('blank arabic text falls back to a sensible label',
+   planDay(start, cfg, 2).tasks.find((t) => t.kind === 'arabic').label === 'Arabic study');
+ok('arabic can be switched off',
+   !planDay(start, { ...ar, arabicEnabled: false }, 2).tasks.some((t) => t.kind === 'arabic'));
+eq('arabic follows its own days, not lesson days',
+   planDay(start, { ...ar, arabicDays: [1,2,3,4,5] }, 7).tasks.map((t) => t.kind),
+   ['sabqi', 'manzil']);
+ok('a Qur\u2019an rest day can still be an arabic day',
+   planDay(start, { ...ar, restDays: [6] }, 6).tasks.map((t) => t.kind).join(',') === 'arabic');
+ok('arabic never touches the rotation cursors',
+   planDay(start, ar, 2).next.manzilCursor === planDay(start, cfg, 2).next.manzilCursor);
 
 console.log('\n[purity]');
 const frozen = { memFrom: 496, memTo: 604, sabqiCursor: 496, manzilCursor: 506 };

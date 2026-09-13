@@ -23,7 +23,8 @@ function reset(seeded) {
   if (seeded) {
     db.plan_config.push({ user_id: UID, direction: 'backward', lesson_days: [1,5],
       new_pages_per_lesson: 1, sabqi_window_pages: 10, sabqi_pages_per_day: 5,
-      manzil_pages_per_day: 8, rest_days: [] });
+      manzil_pages_per_day: 8, rest_days: [],
+      arabic_enabled: true, arabic_text: '', arabic_days: [1,2,3,4,5,6,7] });
     db.progress.push({ user_id: UID, mem_from: 496, mem_to: 604,
       sabqi_cursor: 496, manzil_cursor: 0, last_planned_date: null });
   }

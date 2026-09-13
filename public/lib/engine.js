@@ -23,7 +23,10 @@ export const DEFAULT_CONFIG = {
   sabqiWindowPages: 10,
   sabqiPagesPerDay: 5,
   manzilPagesPerDay: 8,
-  restDays: []
+  restDays: [],
+  arabicEnabled: true,
+  arabicText: '',
+  arabicDays: [1, 2, 3, 4, 5, 6, 7]
 };
 
 /* ---------- pools ---------- */
@@ -132,6 +135,16 @@ export function planDay(state, config, isoWeekday) {
       });
       next.manzilCursor = man.nextCursor;
     }
+  }
+
+  // Arabic is not page-based, so it carries no range and follows its own days -
+  // a Qur'an rest day does not necessarily mean a day off Arabic.
+  if (config.arabicEnabled && (config.arabicDays || []).includes(isoWeekday)) {
+    tasks.push({
+      kind: 'arabic',
+      from: 0, to: 0,
+      label: (config.arabicText || '').trim() || 'Arabic study'
+    });
   }
 
   return { tasks, next };
