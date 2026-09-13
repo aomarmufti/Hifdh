@@ -163,8 +163,10 @@ async function loadAll() {
   state.settings = settings.data || {};
   state.inspirations = insp.data || [];
 
+  // Every row counts toward its own date, carried-away ones included: a day you
+  // left work on should read as incomplete, and the copy lives on a later date.
   const all = tasks.data || [];
-  state.tasks = all.filter((t) => t.task_date === dateKey());
+  state.tasks = all.filter((t) => t.task_date === dateKey() && !t.carried_away);
   state.history = {};
   for (const t of all) {
     const h = state.history[t.task_date] || (state.history[t.task_date] = { total: 0, done: 0 });
@@ -182,14 +184,21 @@ async function ensureDayPlanned() {
   if (!state.progress) return;
 
   // 1. Carry unfinished work forward onto today.
+  //
+  // The original row stays on its own date and is flagged carried_away; a copy
+  // is made for today. Moving the row instead would erase the fact that the
+  // earlier day had work left undone, and the heatmap would score a missed day
+  // as a complete one.
   const { data: stale } = await sb.from('daily_tasks').select('*')
-    .eq('done', false).lt('task_date', today);
+    .eq('done', false).eq('carried_away', false).lt('task_date', today);
   if (stale && stale.length) {
-    for (const t of stale) {
-      await sb.from('daily_tasks')
-        .update({ task_date: today, carried_from: t.carried_from || t.task_date })
-        .eq('id', t.id);
-    }
+    await sb.from('daily_tasks').update({ carried_away: true })
+      .in('id', stale.map((t) => t.id));
+    await sb.from('daily_tasks').insert(stale.map((t) => ({
+      user_id: state.user.id, task_date: today, kind: t.kind,
+      page_from: t.page_from, page_to: t.page_to, label: t.label,
+      carried_from: t.carried_from || t.task_date
+    })));
   }
 
   // 2. Plan today, once.
@@ -207,7 +216,14 @@ async function ensureDayPlanned() {
     saveProgress();
   }
 
-  const { data } = await sb.from('daily_tasks').select('*').eq('task_date', today);
+  await refreshToday();
+}
+
+// Today's working set excludes anything already carried away.
+async function refreshToday() {
+  const today = dateKey();
+  const { data } = await sb.from('daily_tasks').select('*')
+    .eq('task_date', today).eq('carried_away', false);
   state.tasks = data || [];
   const h = state.history[today] || (state.history[today] = { total: 0, done: 0 });
   h.total = state.tasks.length;
@@ -244,11 +260,7 @@ async function regenerateToday() {
   }
   state.progress = { ...next, lastPlanned: today };
   saveProgress();
-
-  const { data } = await sb.from('daily_tasks').select('*').eq('task_date', today);
-  state.tasks = data || [];
-  const h = state.history[today] || (state.history[today] = { total: 0, done: 0 });
-  h.total = state.tasks.length; h.done = state.tasks.filter((t) => t.done).length;
+  await refreshToday();
 }
 
 /* ══════════════════════ Today ══════════════════════ */
@@ -541,7 +553,7 @@ function renderProgress() {
       }
       const label = day.toLocaleDateString(undefined,{day:'numeric',month:'short'});
       html += `<button class="cell l${lv} ${k>todayK?'is-future':''}" type="button"
-                 data-day="${esc(label)}" data-n="${k>todayK?-1:(h?h.done:0)}"
+                 data-k="${k}" data-day="${esc(label)}" data-n="${k>todayK?-1:(h?h.done:0)}"
                  data-t="${h?h.total:0}" aria-label="${esc(label)}"></button>`;
     }
     html += '</div>';

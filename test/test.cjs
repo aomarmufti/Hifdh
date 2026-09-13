@@ -110,27 +110,62 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
   /* ─────────── 5. carry-over ─────────── */
   console.log('\n[5] Unfinished work carries over');
   await api('reset', { seeded: true });
+  // Yesterday: three portions, only one done. That day must stay on record as
+  // incomplete even after the other two are carried forward.
   await api('poke', { table: 'daily_tasks', rows: [
     { id: 'old-1', user_id: 'user-probe-0001', task_date: back(1), kind: 'manzil',
       page_from: 560, page_to: 567, label: 'At-Tahrim → Al-Ma’arij',
-      done: false, done_at: null, carried_from: null },
+      done: false, done_at: null, carried_from: null, carried_away: false },
+    { id: 'old-3', user_id: 'user-probe-0001', task_date: back(1), kind: 'sabqi',
+      page_from: 496, page_to: 500, label: 'Ad-Dukhan → Al-Jathiyah',
+      done: false, done_at: null, carried_from: null, carried_away: false },
+    { id: 'old-4', user_id: 'user-probe-0001', task_date: back(1), kind: 'arabic',
+      page_from: 0, page_to: 0, label: 'Arabic study',
+      done: true, done_at: new Date().toISOString(), carried_from: null, carried_away: false },
     { id: 'old-2', user_id: 'user-probe-0001', task_date: back(2), kind: 'sabqi',
       page_from: 496, page_to: 500, label: 'Ad-Dukhan → Al-Jathiyah',
-      done: true, done_at: new Date().toISOString(), carried_from: null }
+      done: true, done_at: new Date().toISOString(), carried_from: null, carried_away: false }
   ]});
   await api('authed');
   await page.goto(BASE);
   await page.waitForSelector('#app:not([hidden])', { timeout: 5000 });
 
   db = await api('dump');
-  const moved = db.daily_tasks.find((t) => t.id === 'old-1');
+  const origin = db.daily_tasks.find((t) => t.id === 'old-1');
   const stayed = db.daily_tasks.find((t) => t.id === 'old-2');
-  ok('the unfinished task moved to today', moved.task_date === key(), moved.task_date);
-  ok('and remembers where it came from', moved.carried_from === back(1), String(moved.carried_from));
-  ok('the completed task did NOT move', stayed.task_date === back(2), stayed.task_date);
+  const copy = db.daily_tasks.find((t) => t.task_date === key() &&
+                                          t.carried_from === back(1) && t.kind === 'manzil');
+  ok('the original row stays on its own date', origin.task_date === back(1), origin.task_date);
+  ok('and is flagged as carried away', origin.carried_away === true, String(origin.carried_away));
+  ok('a copy appears on today', !!copy, 'no copy found');
+  ok('the copy keeps the same pages',
+     copy && copy.page_from === 560 && copy.page_to === 567,
+     copy && `${copy.page_from}-${copy.page_to}`);
+  ok('the copy remembers where it came from', copy && copy.carried_from === back(1),
+     copy && String(copy.carried_from));
+  ok('a completed task is never carried', stayed.task_date === back(2) && !stayed.carried_away);
+  ok('the finished Arabic task was not carried either',
+     db.daily_tasks.filter((t) => t.kind === 'arabic' && t.carried_from === back(1)).length === 0);
+
   const txt = await page.textContent('#tasks');
   ok('the carried task is visible today', txt.includes("Al-Ma’arij") || txt.includes("Ma'arij"), txt.slice(0,300));
   ok('and is flagged as carried over', await page.locator('.task.is-carried').first().isVisible());
+  ok('the carried-away original is not shown twice today',
+     (await page.locator('.task').count()) === db.daily_tasks
+       .filter((t) => t.task_date === key() && !t.carried_away).length);
+
+  // The whole point: a missed day must not score as a perfect day.
+  await page.click('[data-view="progress"]');
+  await page.waitForSelector('#view-progress:not([hidden])');
+  const cell = page.locator(`#heatmap .cell[data-k="${back(1)}"]`);
+  ok('yesterday still records all three portions',
+     (await cell.getAttribute('data-t')) === '3', await cell.getAttribute('data-t'));
+  ok('yesterday records only the one that was done',
+     (await cell.getAttribute('data-n')) === '1', await cell.getAttribute('data-n'));
+  ok('and is NOT shaded as complete',
+     !(await cell.getAttribute('class')).includes('l3'), await cell.getAttribute('class'));
+  await page.click('[data-view="today"]');
+  await page.waitForTimeout(200);
 
   /* ─────────── 6. the planner recalculates ─────────── */
   console.log('\n[6] Changing the plan recalculates');

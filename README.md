@@ -46,8 +46,13 @@ nothing.
 
 ### Unfinished work carries over
 
-A portion you did not get to moves to the next day, tagged with the day it came
-from, instead of disappearing.
+A portion you did not get to reappears on the next day, tagged with the day it
+came from, instead of disappearing.
+
+The original row stays on its own date rather than moving, so history stays
+honest: a day with three portions where you finished one is recorded as one of
+three, not as a complete day. Carrying it forward must not launder a missed day
+into a perfect one.
 
 ### Memorizing direction
 
@@ -96,7 +101,7 @@ holds one thing: an offline outbox that replays a tick made with no signal.
 |---|---|
 | `plan_config` | the dials, including the Arabic task |
 | `progress` | memorized range + the two rotation cursors |
-| `daily_tasks` | every generated portion, done state, carry-over origin |
+| `daily_tasks` | every generated portion, done state, carry-over origin and flag |
 | `weekly_review` | the weekly retention log |
 | `inspirations` | the shared daily messages (read-only) |
 | `settings` | reminder time |
@@ -127,15 +132,15 @@ projection claims, that two lessons a week really produces two new pages a week
 walking backwards one page at a time, that Arabic follows its own days without
 touching the rotation cursors, and that planning never mutates its input.
 
-**End-to-end (78 assertions, `test/test.cjs`)** — headless Chromium at iPhone
+**End-to-end (86 assertions, `test/test.cjs`)** — headless Chromium at iPhone
 viewport driving the real UI. The database lives in the Node test process, not
 the browser, so the persistence test clears **all** cookies and browser storage,
 reloads, and asserts everything returns — the actual cross-device guarantee.
 
 Covered: first-run setup, that today's portions are computed with the right page
 ranges and surah names, the daily message being stable across a reload,
-optimistic ticking, carry-over of unfinished work (and that finished work does
-*not* move), every planner dial changing the cycle and rebuilding today's
+optimistic ticking, carry-over of unfinished work (that finished work is never carried, and that a
+day left half-done still reads as half-done in the heatmap), every planner dial changing the cycle and rebuilding today's
 portion, the surah pickers agreeing with the stored range, the heatmap and
 retention chart, reminder persistence with the permission prompt denied, dark
 mode, no horizontal overflow at 390px, tap targets, and zero console errors.

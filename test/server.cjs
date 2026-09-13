@@ -81,7 +81,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (op === 'insert') {
       const rows = b.rows.map((r) => ({ id: 'row-' + (idSeq++), done: false, done_at: null,
-                                        carried_from: null, ...r }));
+                                        carried_from: null, carried_away: false, ...r }));
       db[b.table].push(...rows);
       return send(res, 200, { rows });
     }
