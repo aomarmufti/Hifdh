@@ -24,36 +24,55 @@ https://hifdh-seedsacademy.vercel.app — Share → Add to Home Screen.
 
 ## One-time setup
 
-Supabase only sends magic links back to URLs it trusts. In the Supabase
-dashboard for `hifdh-tracker` → **Authentication → URL Configuration**:
+In the Supabase dashboard for `hifdh-tracker`:
 
-- **Site URL**: `https://hifdh-seedsacademy.vercel.app`
-- **Redirect URLs**: add `https://hifdh-seedsacademy.vercel.app/**`
-
-Until that is set the email arrives but its link bounces to `localhost:3000`.
+1. **Authentication → Providers → Anonymous** — turn it on. This is what lets
+   the app open without asking anyone to sign up. Without it the app still
+   works, but falls back to asking for an email first.
+2. **Authentication → Emails → Magic Link** — make sure the template includes
+   `{{ .Token }}`, so the 6-digit code is visible. The code is what the app
+   asks for; the link in the default template is the thing that breaks.
 
 ## The idea
 
-You tell it one thing — the range you have memorized. Everything else is
-derived. It splits your pages three ways, the classical division:
+Two questions, and it works out the rest:
+
+1. **What have you memorised?** (from surah → to surah)
+2. **How many pages can you revise a day?**
+
+It answers immediately: *109 pages · you'll go through all of it every 11 days.*
+Move the number, the answer moves. That is the whole model.
 
 | | what it is | when |
 |---|---|---|
-| **Sabaq** | the new page you present to your teacher | lesson days only |
-| **Sabqi** | your most recent pages, still being strengthened | every day, short cycle |
-| **Manzil** | everything older | every day, long rotation |
+| **Revision** <sub>Murājaʿah</sub> | everything you hold, N pages a day, in order, round and round | every day |
+| **New page** <sub>Sabaq</sub> | the page you prepare for your teacher | lesson days only |
+| **Arabic** | optional standing task with text you set | days you choose |
 
-Arabic rides alongside as a standing daily task: it has no page model, so you
-set the text ("Madinah Book 2, lesson 7") and which days it runs. It can be
-switched off, and a Qur'an rest day can still be an Arabic day.
+There used to be two overlapping revision rotations here — the classical
+sabqi/manzil split. It was correct and nobody could understand it. One dial, one
+promise, and the Today screen shows how far through the round you are.
 
-Each day it hands you a specific page range with surah names. The manzil
-rotation walks the whole pool and starts again, so the Plan screen can tell you
-*"everything every 13 days"* — and that number moves when you move the dials.
+Plain English leads throughout; the traditional term is kept as a quiet subtitle
+for those who recognise it. Nobody should have to learn a word to use this.
+
+## Getting in
+
+There is no sign-up. Opening the app creates an anonymous session silently and
+goes straight to setup.
+
+Email is optional, and only ever entered as a **6-digit code typed in the app**.
+This is not a style choice: on iOS, Safari and an installed Home-Screen PWA have
+separate storage. A magic link tapped in Mail opens in Safari, so the session
+lands somewhere the installed app cannot see, and you are asked to sign in again
+forever. A code never leaves the app, so it lands where you are.
+
+Adding an email later keeps the anonymous account and its history; it just adds
+a way back in, and a second device.
 
 ### Nothing is keyed to the calendar
 
-The schedule's memory is a pair of **cursors**, not a date. A cursor only
+The schedule's memory is a **cursor**, not a date. It only
 advances when work is planned. Miss a day and the rotation resumes exactly where
 it stopped — it never skips to "where it should have been". Miss a week and you
 do not return to a week of backlog, because days you never opened generated
@@ -189,7 +208,7 @@ table is the only thing to change.
 
 `npm test` runs both suites.
 
-**Engine (74 assertions, `test/engine.test.js`)** — pure functions, no browser.
+**Engine (56 assertions, `test/engine.test.js`)** — pure functions, no browser.
 Pools and rotation, chunking and wrap-around, that a skipped day resumes rather
 than jumps, that the same state yields the same portion on any weekday, that a
 full rotation covers all 99 manzil pages exactly once and takes the 13 days the
@@ -200,7 +219,7 @@ over, that un-ticking the page which closed a gap re-opens it, that Arabic
 follows its own days without touching the rotation cursors, and that planning
 never mutates its input.
 
-**End-to-end (108 assertions, `test/test.cjs`)** — headless Chromium at iPhone
+**End-to-end (69 assertions, `test/test.cjs`)** — headless Chromium at iPhone
 viewport driving the real UI. The database lives in the Node test process, not
 the browser, so the persistence test clears **all** cookies and browser storage,
 reloads, and asserts everything returns — the actual cross-device guarantee.
