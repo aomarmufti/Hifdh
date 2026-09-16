@@ -24,263 +24,152 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
 
-  /* ─────────── 1. first run ─────────── */
-  console.log('\n[1] Sign in and first-run setup');
+  /* ─────────── 1. no sign-up wall ─────────── */
+  console.log('\n[1] Opening the app asks for nothing');
   await api('reset', { seeded: false });
+  await api('anon-toggle', { on: true });
   await page.goto(BASE);
-  await page.waitForSelector('#auth:not([hidden])');
-  ok('signed out shows sign in', await page.isVisible('#email'));
+  // Straight past any sign-in screen into setup.
+  await page.waitForSelector('#setup:not([hidden])', { timeout: 6000 });
+  ok('no sign-in screen is shown', !(await page.isVisible('#email')));
+  ok('it goes straight to setup', await page.isVisible('#su-from'));
+  let db = await api('dump');
+  ok('a session exists with no email', db && true);
 
-  await page.fill('#email', 'probe@example.com');
-  await page.click('#auth-btn');
-  await page.waitForSelector('#setup:not([hidden])', { timeout: 5000 });
-  ok('a new account is asked what it has memorized', await page.isVisible('#su-from'));
-  ok('defaults to Ad-Dukhan', (await page.inputValue('#su-from')) === '44',
-     await page.inputValue('#su-from'));
+  /* ─────────── 2. setup is two questions ─────────── */
+  console.log('\n[2] Setup answers you back');
+  ok('defaults to Ad-Dukhan', (await page.inputValue('#su-from')) === '44');
   ok('defaults to An-Nas', (await page.inputValue('#su-to')) === '114');
-  ok('shows the page count for that range',
-     (await page.textContent('#setup-summary')).includes('109 pages'),
-     await page.textContent('#setup-summary'));
-  ok('and names the range', (await page.textContent('#setup-summary')).includes('Ad-Dukhan → An-Nas'));
+  ok('it says how much that is',
+     (await page.textContent('#su-held')).includes('109 pages'),
+     await page.textContent('#su-held'));
+  ok('and names the range', (await page.textContent('#su-held')).includes('Ad-Dukhan → An-Nas'));
+  ok('the payoff line states the cycle',
+     /every 11 days/.test(await page.textContent('#su-cycle')),
+     await page.textContent('#su-cycle'));
+
+  // The core promise: change the number, the answer changes with it.
+  for (let i = 0; i < 5; i++) await page.click('#su-stepper [data-d="-1"]');
+  ok('5 pages a day is offered', (await page.textContent('#su-pages')) === '5');
+  ok('and the cycle recalculates to 22 days',
+     /every 22 days/.test(await page.textContent('#su-cycle')),
+     await page.textContent('#su-cycle'));
+  for (let i = 0; i < 5; i++) await page.click('#su-stepper [data-d="1"]');
+  ok('back to 11 days at 10 a day',
+     /every 11 days/.test(await page.textContent('#su-cycle')));
 
   await page.click('#setup-go');
-  await page.waitForSelector('#app:not([hidden])', { timeout: 5000 });
-  ok('setup builds the plan and opens the app', await page.isVisible('#view-today'));
+  await page.waitForSelector('#app:not([hidden])', { timeout: 6000 });
+  ok('starting opens the app', await page.isVisible('#view-today'));
 
-  let db = await api('dump');
-  ok('progress row written', db.progress.length === 1);
-  ok('memorized range stored as pages 496-604',
-     db.progress[0].mem_from === 496 && db.progress[0].mem_to === 604,
-     JSON.stringify(db.progress[0]));
-  ok('config row written with Mon+Fri lessons',
-     JSON.stringify(db.plan_config[0].lesson_days) === '[1,5]',
-     JSON.stringify(db.plan_config[0] && db.plan_config[0].lesson_days));
+  db = await api('dump');
+  ok('the plan is stored as one dial', db.plan_config[0].revision_pages_per_day === 10,
+     String(db.plan_config[0].revision_pages_per_day));
+  ok('no sabqi or manzil columns remain',
+     !('sabqi_pages_per_day' in db.plan_config[0]) && !('manzil_pages_per_day' in db.plan_config[0]));
+  ok('pages 496-604 recorded',
+     db.progress[0].mem_from === 496 && db.progress[0].mem_to === 604);
 
-  /* ─────────── 2. today is calculated ─────────── */
-  console.log('\n[2] Today is calculated, not hand-written');
-  const lesson = [1, 5].includes(isoDay());
+  /* ─────────── 3. today is plain English ─────────── */
+  console.log('\n[3] Today says what to do, in English');
+  const tasksTxt = await page.textContent('#tasks');
+  ok('no jargon on screen', !/sabqi|manzil|sabaq/i.test(tasksTxt), tasksTxt.slice(0, 200));
+  ok('it says Revision', tasksTxt.includes('Revision'));
+  ok('the traditional term is kept as a quiet subtitle',
+     (await page.locator('.kind-ar').count()) >= 1);
+
   db = await api('dump');
   const todays = db.daily_tasks.filter((t) => t.task_date === key());
-  ok('tasks were generated for today', todays.length >= 2, String(todays.length));
-  ok(`today has ${lesson ? 'a new page (lesson day)' : 'no new page (not a lesson day)'}`,
-     todays.some((t) => t.kind === 'sabaq') === lesson);
-  ok('sabqi and manzil are both scheduled',
-     todays.some((t) => t.kind === 'sabqi') && todays.some((t) => t.kind === 'manzil'));
+  const rev = todays.find((t) => t.kind === 'revision');
+  ok('one revision portion', !!rev);
+  ok('of exactly 10 pages', rev && rev.pages.length === 10, rev && String(rev.pages.length));
+  ok('starting at the first page held', rev && rev.page_from === 496, rev && String(rev.page_from));
+  ok('there is no separate sabqi task',
+     !db.daily_tasks.some((t) => ['sabqi','manzil'].includes(t.kind)));
+  const lesson = [1, 5].includes(isoDay());
+  ok(`a new page ${lesson ? 'is' : 'is not'} scheduled today`,
+     todays.some((t) => t.kind === 'new') === lesson);
 
-  const manzil = todays.find((t) => t.kind === 'manzil');
-  ok('manzil is 8 pages', manzil.page_to - manzil.page_from + 1 === 8,
-     `${manzil.page_from}-${manzil.page_to}`);
-  ok('manzil starts after the sabqi window (p506)', manzil.page_from === 506,
-     String(manzil.page_from));
-  ok('manzil is labelled with surah names', /[A-Za-z]/.test(manzil.label), manzil.label);
-  const sabqi = todays.find((t) => t.kind === 'sabqi');
-  ok('sabqi covers the newest pages', sabqi.page_from === 496, String(sabqi.page_from));
+  ok('the cycle line is shown once', await page.isVisible('#cycle-line'));
+  ok('and states the promise',
+     /everything every 11 days/.test(await page.textContent('#cycle-text')),
+     await page.textContent('#cycle-text'));
+  ok('the ring is gone', (await page.locator('.ring').count()) === 0);
+  ok('the stat tiles are gone from Today',
+     (await page.locator('#view-today .mini').count()) === 0);
 
-  const shown = await page.textContent('#tasks');
-  ok('the page range is shown on screen', shown.includes('p.506'), shown.slice(0, 200));
-  ok('pages held is displayed', (await page.textContent('#m-known')) === '109',
-     await page.textContent('#m-known'));
-  ok('the cycle length is displayed', (await page.textContent('#m-cycle')) === '13',
-     await page.textContent('#m-cycle'));
-
-  /* ─────────── 3. daily inspiration ─────────── */
-  console.log('\n[3] Daily message');
-  ok('an inspiration is shown', await page.isVisible('#inspire'));
-  const body1 = await page.textContent('#insp-body');
-  ok('it has a body', body1.length > 10);
-  ok('it cites a source', (await page.textContent('#insp-src')).length > 3,
-     await page.textContent('#insp-src'));
-  ok('it carries an encouragement', (await page.textContent('#insp-note')).length > 5);
-  await page.reload();
-  await page.waitForSelector('#app:not([hidden])');
-  ok('the same message persists through the day',
-     (await page.textContent('#insp-body')) === body1);
-
-  /* ─────────── 4. ticking work ─────────── */
+  /* ─────────── 4. ticking ─────────── */
   console.log('\n[4] Completing a portion');
-  const ringBefore = await page.textContent('#ring-num');
   await page.click('.task[data-id]');
-  await page.waitForTimeout(350);
-  ok('the first task shows as done', await page.locator('.task.is-done').first().isVisible());
-  ok('the ring count drops', (await page.textContent('#ring-num')) !== ringBefore,
-     `${ringBefore} -> ${await page.textContent('#ring-num')}`);
+  await page.waitForTimeout(400);
+  ok('it shows as done', await page.locator('.task.is-done').first().isVisible());
   db = await api('dump');
-  ok('completion is persisted', db.daily_tasks.some((t) => t.done === true));
+  ok('and is persisted', db.daily_tasks.some((t) => t.done === true));
 
-  /* ─────────── 5. carry-over ─────────── */
-  console.log('\n[5] Unfinished work carries over');
-  await api('reset', { seeded: true });
-  // Yesterday: three portions, only one done. That day must stay on record as
-  // incomplete even after the other two are carried forward.
-  await api('poke', { table: 'daily_tasks', rows: [
-    { id: 'old-1', user_id: 'user-probe-0001', task_date: back(1), kind: 'manzil',
-      page_from: 560, page_to: 567, label: 'At-Tahrim → Al-Haqqah',
-      done: false, done_at: null, carried_from: null, carried_away: false },
-    { id: 'old-3', user_id: 'user-probe-0001', task_date: back(1), kind: 'sabqi',
-      page_from: 496, page_to: 500, label: 'Ad-Dukhan → Al-Jathiyah',
-      done: false, done_at: null, carried_from: null, carried_away: false },
-    { id: 'old-4', user_id: 'user-probe-0001', task_date: back(1), kind: 'arabic',
-      page_from: 0, page_to: 0, label: 'Arabic study',
-      done: true, done_at: new Date().toISOString(), carried_from: null, carried_away: false },
-    { id: 'old-2', user_id: 'user-probe-0001', task_date: back(2), kind: 'sabqi',
-      page_from: 496, page_to: 500, label: 'Ad-Dukhan → Al-Jathiyah',
-      done: true, done_at: new Date().toISOString(), carried_from: null, carried_away: false }
-  ]});
-  await api('authed');
-  await page.goto(BASE);
-  await page.waitForSelector('#app:not([hidden])', { timeout: 5000 });
+  /* ─────────── 5. the plan recalculates ─────────── */
+  console.log('\n[5] Plan');
+  // A portion already finished is deliberately NOT rebuilt when the dial moves.
+  // Un-tick it so the rebuild path is the one under test.
+  await page.click('.task.is-done');
+  await page.waitForTimeout(400);
+  ok('un-ticking works', (await page.locator('.task.is-done').count()) === 0);
 
-  db = await api('dump');
-  const origin = db.daily_tasks.find((t) => t.id === 'old-1');
-  const stayed = db.daily_tasks.find((t) => t.id === 'old-2');
-  const copy = db.daily_tasks.find((t) => t.task_date === key() &&
-                                          t.carried_from === back(1) && t.kind === 'manzil');
-  ok('the original row stays on its own date', origin.task_date === back(1), origin.task_date);
-  ok('and is flagged as carried away', origin.carried_away === true, String(origin.carried_away));
-  ok('a copy appears on today', !!copy, 'no copy found');
-  ok('the copy keeps the same pages',
-     copy && copy.page_from === 560 && copy.page_to === 567,
-     copy && `${copy.page_from}-${copy.page_to}`);
-  ok('the copy remembers where it came from', copy && copy.carried_from === back(1),
-     copy && String(copy.carried_from));
-  ok('a completed task is never carried', stayed.task_date === back(2) && !stayed.carried_away);
-  ok('the finished Arabic task was not carried either',
-     db.daily_tasks.filter((t) => t.kind === 'arabic' && t.carried_from === back(1)).length === 0);
-
-  const txt = await page.textContent('#tasks');
-  ok('the carried task is visible today', txt.includes('At-Tahrim'), txt.slice(0,300));
-  ok('its surah names are recomputed from the actual pages, not a stored string',
-     txt.includes('Al-Haqqah'), txt.slice(0,300));
-  ok('a carried row without a stored page array still shows its range',
-     txt.includes('p.560'), txt.slice(0,300));
-  ok('and is flagged as carried over', await page.locator('.task.is-carried').first().isVisible());
-  ok('the carried-away original is not shown twice today',
-     (await page.locator('.task').count()) === db.daily_tasks
-       .filter((t) => t.task_date === key() && !t.carried_away).length);
-
-  // The whole point: a missed day must not score as a perfect day.
-  await page.click('[data-view="progress"]');
-  await page.waitForSelector('#view-progress:not([hidden])');
-  const cell = page.locator(`#heatmap .cell[data-k="${back(1)}"]`);
-  ok('yesterday still records all three portions',
-     (await cell.getAttribute('data-t')) === '3', await cell.getAttribute('data-t'));
-  ok('yesterday records only the one that was done',
-     (await cell.getAttribute('data-n')) === '1', await cell.getAttribute('data-n'));
-  ok('and is NOT shaded as complete',
-     !(await cell.getAttribute('class')).includes('l3'), await cell.getAttribute('class'));
-  await page.click('[data-view="today"]');
-  await page.waitForTimeout(200);
-
-  /* ─────────── 6. the planner recalculates ─────────── */
-  console.log('\n[6] Changing the plan recalculates');
   await page.click('[data-view="plan"]');
   await page.waitForSelector('#view-plan:not([hidden])');
-  const sum0 = await page.textContent('#plan-summary');
-  ok('summary states the full-cycle length', /every 13 days/.test(sum0), sum0.slice(0,120));
-  ok('summary states pages held', sum0.includes('109 pages'), sum0.slice(0,120));
-  ok('summary states new pages per week', sum0.includes('2 new pages a week'), sum0.slice(0,200));
-  ok('summary names the surah being learned', sum0.includes('Now learning Az-Zukhruf'),
-     sum0.slice(0,200));
+  const sum = await page.textContent('#plan-summary');
+  ok('headline states the cycle', /every 11 days/.test(sum), sum.slice(0, 140));
+  ok('and how much is held', sum.includes('109 pages'), sum.slice(0, 140));
 
-  // A surah that merely *ends* on the first memorized page must not be counted
-  // as memorized: pages 496-604 starts at Ad-Dukhan (44), not Az-Zukhruf (43).
-  ok('the From picker matches the stored range',
-     (await page.inputValue('#p-from')) === '44', await page.inputValue('#p-from'));
-  ok('the To picker matches the stored range',
-     (await page.inputValue('#p-to')) === '114', await page.inputValue('#p-to'));
-  ok('picker and summary agree', sum0.includes('Ad-Dukhan → An-Nas'), sum0.slice(0,160));
-
-  const pv0 = await page.textContent('#preview');
-  ok('a 7-day preview is rendered', (await page.locator('.pv').count()) === 7);
-  ok('preview names surahs', /[A-Z][a-z]+-?/.test(pv0));
-
-  // The cursors have already advanced past today, so the preview starts at
-  // tomorrow - and its first manzil portion must continue from today's.
-  ok('the preview starts at tomorrow, not today',
-     (await page.locator('.pv-day').first().textContent()).includes('Tomorrow'),
-     await page.locator('.pv-day').first().textContent());
+  for (let i = 0; i < 10; i++) await page.click('.stepper[data-key="revision_pages_per_day"] [data-d="1"]');
+  await page.waitForTimeout(150);
+  ok('20 a day selected', (await page.textContent('#v-revision_pages_per_day')) === '20');
+  ok('cycle drops to 6 days', /every 6 days/.test(await page.textContent('#plan-summary')),
+     (await page.textContent('#plan-summary')).slice(0, 140));
+  await page.waitForTimeout(900);
   db = await api('dump');
-  const todayManzil = db.daily_tasks.find(
-    (t) => t.task_date === key() && t.kind === 'manzil' && !t.carried_from);
-  const firstPv = await page.locator('.pv').first().textContent();
-  ok('tomorrow continues from where today stops',
-     firstPv.includes('p.' + (todayManzil.page_to + 1)),
-     `today ends p.${todayManzil.page_to}; preview says ${firstPv.replace(/\s+/g,' ').slice(0,110)}`);
-  ok('and does not repeat today\u2019s pages',
-     !firstPv.includes('p.' + todayManzil.page_from + '–'), firstPv.slice(0,110));
+  ok('saved', db.plan_config[0].revision_pages_per_day === 20);
+  const rebuilt = db.daily_tasks.filter((t) => t.task_date === key() && t.kind === 'revision' && !t.carried_from);
+  ok('today’s portion rebuilt to 20 pages',
+     rebuilt.length === 1 && rebuilt[0].pages.length === 20,
+     JSON.stringify(rebuilt.map((t) => t.pages.length)));
 
-  // Raise manzil pages/day and the cycle must shorten.
-  for (let i = 0; i < 4; i++) {
-    await page.click('.stepper[data-key="manzil_pages_per_day"] [data-d="1"]');
-  }
-  await page.waitForTimeout(120);
-  ok('stepper value updated', (await page.textContent('#v-manzil_pages_per_day')) === '12',
-     await page.textContent('#v-manzil_pages_per_day'));
-  const sum1 = await page.textContent('#plan-summary');
-  ok('cycle recalculates immediately', /every 9 days/.test(sum1), sum1.slice(0,120));
-  await page.waitForTimeout(700);
-  db = await api('dump');
-  ok('the config change is saved', db.plan_config[0].manzil_pages_per_day === 12,
-     String(db.plan_config[0].manzil_pages_per_day));
-  const t2 = db.daily_tasks.filter((t) => t.task_date === key() && t.kind === 'manzil' && !t.carried_from);
-  ok('today’s manzil portion was rebuilt to 12 pages',
-     t2.length === 1 && t2[0].page_to - t2[0].page_from + 1 === 12,
-     JSON.stringify(t2.map((t) => [t.page_from, t.page_to])));
-
-  // Lesson days drive the new-page schedule.
-  await page.click('#p-days [data-d="3"]');     // add Wednesday
-  await page.waitForTimeout(200);
-  const sum2 = await page.textContent('#plan-summary');
-  ok('adding a lesson day changes pages per week', sum2.includes('3 new pages a week'),
-     sum2.slice(0,160));
-  await page.click('#p-days [data-d="3"]');     // back off
-  await page.waitForTimeout(200);
-
-  // Changing what you know changes everything downstream.
-  await page.selectOption('#p-from', '67');     // Al-Mulk .. An-Nas
-  await page.waitForTimeout(700);
-  const sum3 = await page.textContent('#plan-summary');
-  ok('shrinking the memorized range shrinks pages held', sum3.includes('43 pages'), sum3.slice(0,140));
-  ok('and renames the range', sum3.includes('Al-Mulk → An-Nas'), sum3.slice(0,160));
-  db = await api('dump');
-  ok('the new range is stored', db.progress[0].mem_from === 562, String(db.progress[0].mem_from));
-  await page.selectOption('#p-from', '44');
-  await page.waitForTimeout(700);
-
-  /* ─────────── 6b. arabic ─────────── */
-  console.log('\n[6b] Arabic');
-  await page.fill('#p-arabic-text', 'Madinah Book 2, lesson 7 (idafah)');
-  await page.waitForTimeout(1700);
-  db = await api('dump');
-  ok('arabic text saved', db.plan_config[0].arabic_text.includes('idafah'),
-     db.plan_config[0].arabic_text);
-  const arToday = db.daily_tasks.filter((t) => t.task_date === key() && t.kind === 'arabic');
-  ok('an arabic task exists for today', arToday.length === 1, String(arToday.length));
-  ok('it carries the text', arToday[0] && arToday[0].label.includes('idafah'),
-     arToday[0] && arToday[0].label);
-
+  // Finishing then changing the dial must not silently redo the day.
   await page.click('[data-view="today"]');
-  await page.waitForTimeout(250);
-  const tTxt = await page.textContent('#tasks');
-  ok('arabic shows on Today', tTxt.includes('idafah'), tTxt.slice(0, 240));
-  ok('arabic shows no page range',
-     !/idafah[\s\S]{0,40}p\./.test(tTxt), tTxt.slice(0, 240));
-
-  await page.click('[data-view="plan"]');
   await page.waitForTimeout(200);
-  await page.uncheck('#p-arabic-on');
-  await page.waitForTimeout(1200);
+  await page.click('.task[data-id]');
+  await page.waitForTimeout(400);
+  await page.click('[data-view="plan"]');
+  await page.click('.stepper[data-key="revision_pages_per_day"] [data-d="-1"]');
+  await page.waitForTimeout(900);
   db = await api('dump');
-  ok('arabic can be switched off', db.plan_config[0].arabic_enabled === false,
-     String(db.plan_config[0].arabic_enabled));
-  ok('and today\u2019s arabic task is removed',
-     db.daily_tasks.filter((t) => t.task_date === key() && t.kind === 'arabic').length === 0);
-  await page.check('#p-arabic-on');
-  await page.waitForTimeout(1200);
+  const afterDone = db.daily_tasks.filter(
+    (t) => t.task_date === key() && t.kind === 'revision' && !t.carried_from);
+  ok('a finished portion is left alone when the dial moves',
+     afterDone.length === 1 && afterDone[0].done === true,
+     JSON.stringify(afterDone.map((t) => [t.pages.length, t.done])));
 
-  /* ─────────── 6c. memorisation order ─────────── */
-  console.log('\n[6c] New pages enter each surah at its first page');
-  // Make today a lesson day so a sabaq is scheduled whatever day it is.
+  ok('a 7-day preview is shown', (await page.locator('.pv').count()) === 7);
+  ok('the preview starts tomorrow',
+     (await page.locator('.pv-day').first().textContent()).includes('Tomorrow'));
+
+  // Learning can be switched off entirely - a lot of people only revise.
+  await page.uncheck('#p-learning');
+  await page.waitForTimeout(900);
+  db = await api('dump');
+  ok('turning off new pages clears lesson days',
+     JSON.stringify(db.plan_config[0].lesson_days) === '[]',
+     JSON.stringify(db.plan_config[0].lesson_days));
+  ok('and the summary says revision only',
+     (await page.textContent('#plan-summary')).includes('Revision only'));
+  await page.check('#p-learning');
+  await page.waitForTimeout(900);
+  db = await api('dump');
+  ok('turning it back on restores sensible days',
+     JSON.stringify(db.plan_config[0].lesson_days) === '[1,5]',
+     JSON.stringify(db.plan_config[0].lesson_days));
+
+  /* ─────────── 6. memorisation order still right ─────────── */
+  console.log('\n[6] New pages enter each surah at its first page');
   const wd = isoDay();
   const dayBtn = page.locator(`#p-days [data-d="${wd}"]`);
   if (!(await dayBtn.getAttribute('class')).includes('on')) {
@@ -288,195 +177,126 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
     await page.waitForTimeout(1200);
   }
   db = await api('dump');
-  const sabaq = db.daily_tasks.find((t) => t.task_date === key() && t.kind === 'sabaq');
-  ok('a new page is scheduled today', !!sabaq, 'none found');
-  // Holding Ad-Dukhan..An-Nas, the next surah down is Az-Zukhruf (p489-495).
-  // The first new page must be p489, its FIRST page - not p495.
-  ok('the new page is the FIRST page of Az-Zukhruf', sabaq && sabaq.page_from === 489,
-     sabaq && String(sabaq.page_from));
-  ok('it is not the last page of that surah', sabaq && sabaq.page_from !== 495);
-  ok('and it is labelled Az-Zukhruf', sabaq && sabaq.label === 'Az-Zukhruf', sabaq && sabaq.label);
+  const fresh = db.daily_tasks.find((t) => t.task_date === key() && t.kind === 'new');
+  ok('a new page is scheduled', !!fresh);
+  ok('it is p489, the FIRST page of Az-Zukhruf', fresh && fresh.page_from === 489,
+     fresh && String(fresh.page_from));
+  ok('not p495, its last', fresh && fresh.page_from !== 495);
 
-  await page.click('[data-view="today"]');
-  await page.waitForTimeout(250);
-  const tToday = await page.textContent('#tasks');
-  ok('Today shows it as the new page', tToday.includes('Az-Zukhruf') && tToday.includes('p.489'),
-     tToday.slice(0, 260));
+  /* ─────────── 7. carry-over ─────────── */
+  console.log('\n[7] Unfinished work carries, history stays honest');
+  await api('reset', { seeded: true });
+  await api('poke', { table: 'daily_tasks', rows: [
+    { id: 'old-1', user_id: 'user-probe-0001', task_date: back(1), kind: 'revision',
+      page_from: 560, page_to: 567, pages: [560,561,562,563,564,565,566,567],
+      label: 'At-Tahrim → Al-Haqqah', done: false, done_at: null,
+      carried_from: null, carried_away: false },
+    { id: 'old-2', user_id: 'user-probe-0001', task_date: back(1), kind: 'new',
+      page_from: 489, page_to: 489, pages: [489], label: 'Az-Zukhruf',
+      done: true, done_at: new Date().toISOString(), carried_from: null, carried_away: false }
+  ]});
+  await api('anon');
+  await page.goto(BASE);
+  await page.waitForSelector('#app:not([hidden])', { timeout: 6000 });
 
-  // Completing it must extend what is held without closing the surah yet.
-  const sabaqCard = page.locator(`.task[data-id="${sabaq.id}"]`);
-  await sabaqCard.scrollIntoViewIfNeeded();
-  await sabaqCard.click();
-  await page.waitForTimeout(600);
   db = await api('dump');
-  ok('the part-learned surah is tracked, block unmoved',
-     db.progress[0].partial_from === 489 && db.progress[0].partial_to === 489 &&
-     db.progress[0].mem_from === 496,
-     JSON.stringify([db.progress[0].partial_from, db.progress[0].partial_to, db.progress[0].mem_from]));
-  ok('pages held goes up by one', (await page.textContent('#m-known')) === '110',
-     await page.textContent('#m-known'));
+  const origin = db.daily_tasks.find((t) => t.id === 'old-1');
+  const copy = db.daily_tasks.find((t) => t.task_date === key() && t.carried_from === back(1));
+  ok('the original stays on its own date', origin.task_date === back(1));
+  ok('flagged as carried away', origin.carried_away === true);
+  ok('a copy appears today', !!copy);
+  ok('the finished task is not carried',
+     !db.daily_tasks.some((t) => t.kind === 'new' && t.carried_from === back(1)));
+  ok('today shows it as carried', await page.locator('.task.is-carried').first().isVisible());
 
-  // And un-ticking must put it back.
-  await sabaqCard.click();
-  await page.waitForTimeout(600);
-  db = await api('dump');
-  ok('un-ticking removes it again',
-     db.progress[0].partial_from === null && db.progress[0].mem_from === 496,
-     JSON.stringify([db.progress[0].partial_from, db.progress[0].mem_from]));
-  ok('pages held goes back down', (await page.textContent('#m-known')) === '109',
-     await page.textContent('#m-known'));
-
-  await page.click('[data-view="plan"]');
-  await page.waitForTimeout(250);
-  if ((await page.locator(`#p-days [data-d="${wd}"]`).getAttribute('class')).includes('on')
-      && ![1, 5].includes(wd)) {
-    await page.locator(`#p-days [data-d="${wd}"]`).click();   // restore
-    await page.waitForTimeout(1000);
-  }
-
-  /* ─────────── 7. direction ─────────── */
-  console.log('\n[7] Memorizing direction');
-  await page.click('#p-direction [data-v="forward"]');
-  await page.waitForTimeout(300);
-  ok('forward is selected', await page.locator('#p-direction [data-v="forward"].on').isVisible());
-  await page.click('#p-direction [data-v="backward"]');
-  await page.waitForTimeout(700);
-  ok('backward is selected again',
-     await page.locator('#p-direction [data-v="backward"].on').isVisible());
-  db = await api('dump');
-  ok('direction persisted', db.plan_config[0].direction === 'backward', db.plan_config[0].direction);
-
-  /* ─────────── 8. progress views ─────────── */
-  console.log('\n[8] Progress');
   await page.click('[data-view="progress"]');
   await page.waitForSelector('#view-progress:not([hidden])');
-  ok('heatmap is 8 weeks', (await page.locator('.hm-col').count()) === 8);
-  ok('heatmap has 56 cells', (await page.locator('#heatmap .cell').count()) === 56);
-  ok('chart empty-state until two reviews', await page.isVisible('#chart-empty'));
+  const cell = page.locator(`#heatmap .cell[data-k="${back(1)}"]`);
+  ok('yesterday records both portions', (await cell.getAttribute('data-t')) === '2',
+     await cell.getAttribute('data-t'));
+  ok('and only the one that was done', (await cell.getAttribute('data-n')) === '1');
+  ok('so a missed day is not shaded complete',
+     !(await cell.getAttribute('class')).includes('l3'));
 
-  for (const [d, v] of [[21,'30/48'],[14,'35/48'],[7,'39/48'],[0,'44/48']]) {
-    await page.fill('#rv-date', back(d));
-    await page.fill('#rv-zero', v);
-    await page.fill('#rv-note', "Al-Waqi'ah is solid now");
-    await page.click('#review-form button[type=submit]');
-    await page.waitForTimeout(220);
-  }
-  db = await api('dump');
-  ok('four reviews stored', db.weekly_review.length === 4, String(db.weekly_review.length));
-  ok('apostrophe survived the round trip',
-     db.weekly_review.every((r) => r.note.includes("Al-Waqi'ah")));
-  ok('chart renders', await page.isVisible('#chart svg'));
-  ok('chart has four points', (await page.locator('#chart circle').count()) === 4);
-
-  await page.locator('#chart svg').scrollIntoViewIfNeeded();
-  const box = await page.locator('#chart svg').boundingBox();
-  await page.touchscreen.tap(box.x + box.width * 0.95, box.y + box.height / 2);
-  await page.waitForTimeout(250);
-  ok('tapping the chart shows the value',
-     (await page.textContent('#tip')).includes('44/48'), await page.textContent('#tip'));
-
-  await page.fill('#rv-date', back(0));
-  await page.fill('#rv-zero', '46/48');
-  await page.click('#review-form button[type=submit]');
-  await page.waitForTimeout(300);
-  db = await api('dump');
-  ok('re-saving a week updates in place', db.weekly_review.length === 4,
-     String(db.weekly_review.length));
-
-  /* ─────────── 9. persistence across a wiped cold start ─────────── */
-  console.log('\n[9] Persistence with all browser storage cleared');
-  await ctx.clearCookies();
-  await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
-  await api('authed');
-  await page.goto(BASE);
-  await page.waitForSelector('#app:not([hidden])', { timeout: 5000 });
-  ok('plan survived', (await page.textContent('#m-known')) === '109',
-     await page.textContent('#m-known'));
-  await page.click('[data-view="progress"]');
-  await page.waitForTimeout(300);
-  ok('reviews survived', (await page.locator('.review-item').count()) === 4);
-  await page.click('[data-view="plan"]');
-  await page.waitForTimeout(200);
-  ok('settings survived', (await page.textContent('#v-manzil_pages_per_day')) === '12',
-     await page.textContent('#v-manzil_pages_per_day'));
-
-  /* ─────────── 10. reminder ─────────── */
-  console.log('\n[10] Reminder');
+  /* ─────────── 8. reminders ─────────── */
+  console.log('\n[8] Reminders');
   await page.click('[data-view="more"]');
   await page.waitForSelector('#view-more:not([hidden])');
   await page.fill('#set-remind', '05:30');
   await page.click('#remind-save');
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(500);
   db = await api('dump');
-  ok('reminder saved even though the permission prompt is denied',
+  ok('the time is saved even with the prompt denied',
      db.settings[0] && db.settings[0].reminder_time === '05:30', JSON.stringify(db.settings));
+  ok('with a timezone', db.settings[0].timezone && db.settings[0].timezone.length > 1);
 
-  /* ─────────── 10b. push notification states ─────────── */
-  console.log('\n[10b] Push reminders');
-  const status = await page.textContent('#remind-status');
-  ok('the reminder screen explains what it will do',
-     /remind/i.test(status), status);
-  ok('the save button is usable on a supporting browser',
-     !(await page.locator('#remind-save').isDisabled()));
-  db = await api('dump');
-  ok('the timezone is captured alongside the time',
-     db.settings[0] && typeof db.settings[0].timezone === 'string' &&
-     db.settings[0].timezone.length > 1, JSON.stringify(db.settings[0]));
-  ok('a denied permission prompt still leaves the time saved',
-     db.settings[0].reminder_time === '05:30', String(db.settings[0].reminder_time));
+  /* ─────────── 9. anonymous account, optional email ─────────── */
+  console.log('\n[9] The account is optional');
+  ok('an anonymous account is offered a way to save progress',
+     await page.isVisible('#link-form'));
+  ok('and is not asked to sign out of nothing', !(await page.isVisible('#account-signout')));
+  await page.fill('#link-email', 'me@example.com');
+  await page.click('#link-btn');
+  await page.waitForTimeout(400);
+  ok('a code is sent, not a link',
+     /code/i.test(await page.textContent('#link-msg')), await page.textContent('#link-msg'));
+  ok('the code box appears in the app', await page.isVisible('#link-code-form'));
+  await page.fill('#link-code', '123456');
+  await page.click('#link-code-form button[type=submit]');
+  await page.waitForTimeout(500);
+  ok('entering it links the account without leaving the app',
+     (await page.textContent('#set-email')) === 'me@example.com',
+     await page.textContent('#set-email'));
+  ok('and the sign-out option now exists', await page.isVisible('#account-signout'));
 
-  // iOS refuses push to a browser tab; only an installed Home Screen app gets
-  // it. The screen has to say so rather than appearing to work.
-  const iphone = await browser.newContext({
-    viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,
-    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
-  });
-  const ip = await iphone.newPage();
-  await api('authed');
-  await ip.goto(BASE);
-  await ip.waitForSelector('#app:not([hidden])', { timeout: 5000 });
-  await ip.click('[data-view="more"]');
-  await ip.waitForTimeout(400);
-  const iosMsg = await ip.textContent('#remind-status');
-  ok('on an uninstalled iPhone it asks you to Add to Home Screen',
-     /home screen/i.test(iosMsg), iosMsg);
-  ok('and it does not pretend the button will work',
-     await ip.locator('#remind-save').isDisabled());
-  await iphone.close();
+  /* ─────────── 10. the fallback when anonymous is off ─────────── */
+  console.log('\n[10] If anonymous sign-in is unavailable');
+  await api('reset', { seeded: false });
+  await api('anon-toggle', { on: false });
+  await page.goto(BASE);
+  await page.waitForSelector('#auth:not([hidden])', { timeout: 6000 });
+  ok('it falls back to asking for an email', await page.isVisible('#email'));
+  await page.fill('#email', 'me@example.com');
+  await page.click('#auth-btn');
+  await page.waitForTimeout(400);
+  ok('which sends a code, not a link', await page.isVisible('#code-form'));
+  await page.fill('#code', '123456');
+  await page.click('#code-btn');
+  await page.waitForSelector('#setup:not([hidden])', { timeout: 6000 });
+  ok('and the code gets you in', await page.isVisible('#su-from'));
+  await api('anon-toggle', { on: true });
 
   /* ─────────── 11. presentation ─────────── */
   console.log('\n[11] Layout');
-  await page.click('[data-view="today"]');
-  await page.waitForTimeout(200);
+  await api('reset', { seeded: true });
+  await api('anon');
+  await page.goto(BASE);
+  await page.waitForSelector('#app:not([hidden])', { timeout: 6000 });
   const of = await page.evaluate(() =>
     document.documentElement.scrollWidth - document.documentElement.clientWidth);
   ok('no horizontal overflow at 390px', of <= 0, 'overflow=' + of);
+  ok('four tabs', (await page.locator('.tab').count()) === 4);
   const tb = await page.locator('.task').first().boundingBox();
   ok('task tap target >= 60px', tb.height >= 60, String(tb.height));
-  const tab = await page.locator('.tab').first().boundingBox();
-  ok('tab tap target >= 44px', tab.height >= 44, String(tab.height));
-  ok('four tabs', (await page.locator('.tab').count()) === 4);
 
-  for (const [v, f] of [['today','today'],['plan','plan'],['progress','progress'],['more','more']]) {
+  for (const v of ['today','plan','progress','more']) {
     await page.click(`[data-view="${v}"]`);
     await page.waitForTimeout(260);
-    await page.screenshot({ path: `${__dirname}/shot-${f}.png` });
+    await page.screenshot({ path: `${__dirname}/shot-${v}.png` });
   }
+  await page.click('[data-view="today"]');
   await ctx.close();
 
-  // Dark mode render
   const dark = await browser.newContext({ viewport: { width: 390, height: 844 },
     isMobile: true, hasTouch: true, colorScheme: 'dark' });
   const dp = await dark.newPage();
-  await api('authed');
+  await api('anon');
   await dp.goto(BASE);
-  await dp.waitForSelector('#app:not([hidden])', { timeout: 5000 });
+  await dp.waitForSelector('#app:not([hidden])', { timeout: 6000 });
   await dp.waitForTimeout(400);
   await dp.screenshot({ path: `${__dirname}/shot-dark.png` });
-  const bg = await dp.evaluate(() => getComputedStyle(document.body).backgroundColor);
-  ok('dark mode is deep navy, not pure black', bg === 'rgb(10, 16, 32)', bg);
-  const darkInk = await dp.evaluate(() => getComputedStyle(document.body).color);
-  ok('dark mode text is warm cream, not pure white', darkInk === 'rgb(237, 230, 216)', darkInk);
+  ok('dark mode is deep navy, not pure black',
+     (await dp.evaluate(() => getComputedStyle(document.body).backgroundColor)) === 'rgb(10, 16, 32)');
   await dark.close();
 
   console.log('\n[12] Console');

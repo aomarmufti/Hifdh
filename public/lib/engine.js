@@ -1,43 +1,39 @@
 // Scheduling engine.
 //
-// Everything is derived from what you have memorized and from cursors marking
-// how far through each rotation you are. Nothing is keyed to the calendar, so
-// a missed day never desynchronises the plan - the cursor simply has not moved,
-// and unfinished work is carried.
+// One idea: you hold a set of pages, and you go through them N a day, in
+// order, over and over. That is the whole revision model. When you reach the
+// end you start again, so "everything every 9 days" is a promise the app can
+// actually keep and you can check.
 //
-// Three kinds of work, the classical division:
-//   sabaq  - the new page, only on lesson days
-//   sabqi  - the recently memorized pages, revised hard on a short cycle
-//   manzil - everything older, revised on a long rotation
+// There used to be two rotations here - a short one for recent pages and a
+// long one for older pages, the classical sabqi/manzil split. It was correct
+// and nobody could understand it. One cycle, one dial.
 //
-// MEMORIZING BACKWARDS is not the same as walking pages backwards. You take
-// surahs in descending order, but you learn each one FORWARDS, from its first
-// page to its last. Having finished Ad-Dukhan you do not start at the last page
-// of Az-Zukhruf; you start at its first page and work down to where Ad-Dukhan
-// begins. So mid-surah your memorized pages have a hole in them, and the state
-// carries a second range for the surah in progress.
+// Memorizing new pages is separate and only happens on lesson days. It takes
+// surahs in descending order but learns each one FORWARDS, from its first
+// page: having finished Ad-Dukhan you start Az-Zukhruf at p.489, not p.495.
+// So mid-surah the pages you hold have a hole in them, and the state carries a
+// second range for the surah in progress.
 
 import { labelForPages, surahAtPage, LAST_PAGE } from './quran.js';
 
 export const DEFAULT_CONFIG = {
   direction: 'backward',
-  lessonDays: [1, 5],        // ISO weekdays: Monday, Friday
+  lessonDays: [1, 5],          // ISO weekdays: Monday, Friday
   newPagesPerLesson: 1,
-  sabqiWindowPages: 10,
-  sabqiPagesPerDay: 5,
-  manzilPagesPerDay: 8,
+  revisionPagesPerDay: 10,
   restDays: [],
-  arabicEnabled: true,
+  arabicEnabled: false,
   arabicText: '',
   arabicDays: [1, 2, 3, 4, 5, 6, 7]
 };
 
 /* ------------------------------------------------------------------ *
- * What is memorized
+ * What you hold
  * ------------------------------------------------------------------ */
 
-// Every memorized page, ascending. The consolidated block plus the prefix of
-// the surah currently being learned, which sits below it with a gap between.
+// Every memorized page, ascending: the settled block plus the prefix of the
+// surah being learned, which sits below it with a gap between.
 export function memorizedPages(state) {
   const out = [];
   if (state.partialFrom != null && state.partialTo != null) {
@@ -49,31 +45,17 @@ export function memorizedPages(state) {
   return out.sort((a, b) => a - b);
 }
 
-export function totalPages(state) {
-  return memorizedPages(state).length;
-}
+export const totalPages = (state) => memorizedPages(state).length;
 
-// The newest material - what is still being strengthened. Going backwards the
-// newest pages are the lowest ones; going forwards, the highest.
-export function sabqiPages(state, config) {
-  const all = memorizedPages(state);
-  const n = Math.min(Math.max(0, config.sabqiWindowPages), all.length);
-  if (n === 0) return [];
-  return config.direction === 'backward' ? all.slice(0, n) : all.slice(all.length - n);
-}
-
-// Everything older than the sabqi window.
-export function manzilPages(state, config) {
-  const recent = new Set(sabqiPages(state, config));
-  return memorizedPages(state).filter((p) => !recent.has(p));
-}
+// The revision pool is simply everything you hold.
+export const revisionPages = (state) => memorizedPages(state);
 
 /* ------------------------------------------------------------------ *
  * Rotation
  * ------------------------------------------------------------------ */
 
-// Take the next n pages from a pool starting at cursor. Stops at the end of the
-// pool rather than wrapping mid-chunk, so each pass is a clean finished cycle.
+// Take the next n pages from the pool starting at cursor. Stops at the end
+// rather than wrapping mid-chunk, so each pass is a clean finished cycle.
 export function takeRun(pool, cursor, n) {
   if (!pool.length || n <= 0) return null;
   let i = pool.indexOf(cursor);
@@ -102,23 +84,18 @@ export function describeRuns(pages) {
   return runs.map((r) => ({ ...r, label: labelForPages(r.from, r.to) }));
 }
 
-export function labelForRun(pages) {
-  return describeRuns(pages).map((r) => r.label).join(' · ');
-}
+export const labelForRun = (pages) =>
+  describeRuns(pages).map((r) => r.label).join(' · ');
 
-export function isLessonDay(isoWeekday, config) {
-  return (config.lessonDays || []).includes(isoWeekday);
-}
-export function isRestDay(isoWeekday, config) {
-  return (config.restDays || []).includes(isoWeekday);
-}
+export const isLessonDay = (isoWeekday, config) =>
+  (config.lessonDays || []).includes(isoWeekday);
+export const isRestDay = (isoWeekday, config) =>
+  (config.restDays || []).includes(isoWeekday);
 
 /* ------------------------------------------------------------------ *
  * The next new page
  * ------------------------------------------------------------------ */
 
-// Backwards: continue the surah in progress, or open the next surah down at
-// its FIRST page. Forwards: simply the page after the block.
 export function nextNewPages(state, config) {
   const n = Math.max(0, config.newPagesPerLesson);
   if (n === 0) return null;
@@ -129,7 +106,7 @@ export function nextNewPages(state, config) {
     return { from, to: Math.min(LAST_PAGE, from + n - 1) };
   }
 
-  const gapEnd = state.memFrom - 1;      // last page not yet held
+  const gapEnd = state.memFrom - 1;            // last page not yet held
   if (gapEnd < 1) return null;
 
   const inProgress = state.partialFrom != null && state.partialTo != null;
@@ -142,8 +119,7 @@ export function nextNewPages(state, config) {
 export function activeSurah(state, config) {
   if (config.direction !== 'backward') return null;
   const gapEnd = state.memFrom - 1;
-  if (gapEnd < 1) return null;
-  return surahAtPage(gapEnd);
+  return gapEnd < 1 ? null : surahAtPage(gapEnd);
 }
 
 /* ------------------------------------------------------------------ *
@@ -161,27 +137,19 @@ export function planDay(state, config, isoWeekday) {
     if (np) {
       const pages = [];
       for (let p = np.from; p <= np.to; p++) pages.push(p);
-      tasks.push({ kind: 'sabaq', pages, from: np.from, to: np.to, label: labelForRun(pages) });
+      tasks.push({ kind: 'new', pages, from: np.from, to: np.to, label: labelForRun(pages) });
     }
   }
 
   if (!isRestDay(isoWeekday, config)) {
-    const sab = takeRun(sabqiPages(state, config), next.sabqiCursor, config.sabqiPagesPerDay);
-    if (sab) {
-      tasks.push({ kind: 'sabqi', pages: sab.pages, from: sab.from, to: sab.to,
-                   label: labelForRun(sab.pages), completesCycle: sab.completesCycle });
-      next.sabqiCursor = sab.nextCursor;
-    }
-    const man = takeRun(manzilPages(state, config), next.manzilCursor, config.manzilPagesPerDay);
-    if (man) {
-      tasks.push({ kind: 'manzil', pages: man.pages, from: man.from, to: man.to,
-                   label: labelForRun(man.pages), completesCycle: man.completesCycle });
-      next.manzilCursor = man.nextCursor;
+    const run = takeRun(revisionPages(state), next.revisionCursor, config.revisionPagesPerDay);
+    if (run) {
+      tasks.push({ kind: 'revision', pages: run.pages, from: run.from, to: run.to,
+                   label: labelForRun(run.pages), completesCycle: run.completesCycle });
+      next.revisionCursor = run.nextCursor;
     }
   }
 
-  // Arabic is not page-based, so it carries no range and follows its own days -
-  // a Qur'an rest day does not necessarily mean a day off Arabic.
   if (config.arabicEnabled && (config.arabicDays || []).includes(isoWeekday)) {
     tasks.push({ kind: 'arabic', pages: [], from: 0, to: 0,
                  label: (config.arabicText || '').trim() || 'Arabic study' });
@@ -190,10 +158,10 @@ export function planDay(state, config, isoWeekday) {
   return { tasks, next };
 }
 
-// Applied when a sabaq is completed: the new page joins what you hold. Going
+// Applied when a new page is completed: it joins what you hold. Going
 // backwards it extends the surah in progress, and once that surah reaches the
 // block below it the two merge into one range again.
-export function absorbSabaq(state, config, from, to) {
+export function absorbNew(state, config, from, to) {
   const s = { ...state };
 
   if (config.direction === 'forward') {
@@ -201,7 +169,7 @@ export function absorbSabaq(state, config, from, to) {
   } else {
     const pf = s.partialFrom != null ? Math.min(s.partialFrom, from) : from;
     const pt = s.partialTo != null ? Math.max(s.partialTo, to) : to;
-    if (pt >= s.memFrom - 1) {          // surah complete - close the gap
+    if (pt >= s.memFrom - 1) {              // surah complete - close the gap
       s.memFrom = Math.min(s.memFrom, pf);
       s.partialFrom = null;
       s.partialTo = null;
@@ -211,17 +179,14 @@ export function absorbSabaq(state, config, from, to) {
     }
   }
 
-  // Re-seat any cursor whose pool moved out from under it.
-  const sab = sabqiPages(s, config);
-  if (sab.length && !sab.includes(s.sabqiCursor)) s.sabqiCursor = sab[0];
-  const man = manzilPages(s, config);
-  if (man.length && !man.includes(s.manzilCursor)) s.manzilCursor = man[0];
+  const pool = revisionPages(s);
+  if (pool.length && !pool.includes(s.revisionCursor)) s.revisionCursor = pool[0];
   return s;
 }
 
-// Un-ticking a completed new page. Going backwards this may have to re-open a
-// surah that had just merged into the block.
-export function undoSabaq(state, config, from, to) {
+// Un-ticking a completed new page; may have to re-open a surah that had just
+// merged into the block.
+export function undoNew(state, config, from, to) {
   const s = { ...state };
 
   if (config.direction === 'forward') {
@@ -230,13 +195,9 @@ export function undoSabaq(state, config, from, to) {
   }
 
   if (s.partialTo === to) {
-    // Still mid-surah: shrink the prefix, or drop it entirely.
     if (s.partialFrom >= from) { s.partialFrom = null; s.partialTo = null; }
     else s.partialTo = from - 1;
   } else if (s.partialFrom == null && from >= s.memFrom && to <= s.memTo) {
-    // This page had closed the gap, so the surah merged and memFrom moved down
-    // to the surah's own start. Re-open it: the block begins again above the
-    // undone page, and the rest of the surah returns to being a prefix.
     const surahStart = s.memFrom;
     s.memFrom = to + 1;
     if (from - 1 >= surahStart) { s.partialFrom = surahStart; s.partialTo = from - 1; }
@@ -246,15 +207,24 @@ export function undoSabaq(state, config, from, to) {
 }
 
 /* ------------------------------------------------------------------ *
- * Projections for the planner
+ * Projections
  * ------------------------------------------------------------------ */
 
+// The headline promise: everything you hold, covered, every this many days.
 export function cycleLengthDays(state, config) {
-  const pool = manzilPages(state, config);
-  if (!pool.length || config.manzilPagesPerDay <= 0) return null;
+  const pool = revisionPages(state);
+  if (!pool.length || config.revisionPagesPerDay <= 0) return null;
   const activeDays = 7 - (config.restDays || []).length;
-  const revisionDays = Math.ceil(pool.length / config.manzilPagesPerDay);
+  const revisionDays = Math.ceil(pool.length / config.revisionPagesPerDay);
   return { revisionDays, calendarDays: Math.ceil(revisionDays * 7 / Math.max(1, activeDays)) };
+}
+
+// How far through the current pass you are, for a progress bar you can trust.
+export function cyclePosition(state, config) {
+  const pool = revisionPages(state);
+  if (!pool.length) return null;
+  const i = Math.max(0, pool.indexOf(state.revisionCursor));
+  return { done: i, total: pool.length, fraction: i / pool.length };
 }
 
 // Dry-run the next n days without touching stored state, assuming each is
@@ -266,7 +236,7 @@ export function preview(state, config, startIsoWeekday, days) {
   for (let i = 0; i < days; i++) {
     const { tasks, next } = planDay(s, config, wd);
     s = next;
-    for (const t of tasks) if (t.kind === 'sabaq') s = absorbSabaq(s, config, t.from, t.to);
+    for (const t of tasks) if (t.kind === 'new') s = absorbNew(s, config, t.from, t.to);
     out.push({ dayOffset: i, isoWeekday: wd, tasks });
     wd = wd === 7 ? 1 : wd + 1;
   }

@@ -61,10 +61,30 @@ export function createClient() {
         const { session } = await rpc('session', {});
         return { data: { session } };
       },
+      async getUser() {
+        const { session } = await rpc('session', {});
+        return { data: { user: session ? session.user : null } };
+      },
+      // The real fix for the sign-in journey: a session with no email at all.
+      async signInAnonymously() {
+        const r = await rpc('anon', {});
+        if (r.error) return { data: {}, error: { message: r.error } };
+        if (listener) setTimeout(() => listener('SIGNED_IN', r.session), 0);
+        return { data: { session: r.session }, error: null };
+      },
       async signInWithOtp({ email }) {
-        const { session } = await rpc('signin', { email });
-        if (listener) setTimeout(() => listener('SIGNED_IN', session), 0);
+        await rpc('send-code', { email });
         return { data: {}, error: null };
+      },
+      async verifyOtp({ email, token, type }) {
+        const r = await rpc('verify-code', { email, token, type });
+        if (r.error) return { data: {}, error: { message: r.error } };
+        if (listener) setTimeout(() => listener('SIGNED_IN', r.session), 0);
+        return { data: { session: r.session }, error: null };
+      },
+      async updateUser({ email }) {
+        const r = await rpc('send-code', { email, linking: true });
+        return { data: {}, error: r.error ? { message: r.error } : null };
       },
       async signOut() { await rpc('signout', {}); return { error: null }; },
       onAuthStateChange(cb) { listener = cb; return { data: { subscription: { unsubscribe() {} } } }; }

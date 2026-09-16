@@ -16,18 +16,19 @@ const INSPIRATIONS = [
 ];
 
 let db, session;
+let ANON_ENABLED = true;
+let lastCode = null, lastEmail = null;
 function reset(seeded) {
   db = { plan_config: [], progress: [], daily_tasks: [], weekly_review: [],
          settings: [], inspirations: INSPIRATIONS.slice() };
   session = null;
   if (seeded) {
     db.plan_config.push({ user_id: UID, direction: 'backward', lesson_days: [1,5],
-      new_pages_per_lesson: 1, sabqi_window_pages: 10, sabqi_pages_per_day: 5,
-      manzil_pages_per_day: 8, rest_days: [],
-      arabic_enabled: true, arabic_text: '', arabic_days: [1,2,3,4,5,6,7] });
+      new_pages_per_lesson: 1, revision_pages_per_day: 10, rest_days: [],
+      arabic_enabled: false, arabic_text: '', arabic_days: [1,2,3,4,5,6,7] });
     db.progress.push({ user_id: UID, mem_from: 496, mem_to: 604,
       partial_from: null, partial_to: null,
-      sabqi_cursor: 496, manzil_cursor: 0, last_planned_date: null });
+      revision_cursor: 496, last_planned_date: null });
   }
 }
 reset(false);
@@ -67,7 +68,18 @@ const server = http.createServer(async (req, res) => {
     const b = await body(req);
 
     if (op === 'session') return send(res, 200, { session });
-    if (op === 'signin')  { session = { user: { id: UID, email: b.email } }; return send(res, 200, { session }); }
+    if (op === 'anon') {
+      if (!ANON_ENABLED) return send(res, 200, { error: 'anonymous_provider_disabled' });
+      session = { user: { id: UID, email: null } };
+      return send(res, 200, { session });
+    }
+    if (op === 'anon-toggle') { ANON_ENABLED = !!b.on; return send(res, 200, {}); }
+    if (op === 'send-code') { lastCode = '123456'; lastEmail = b.email; return send(res, 200, {}); }
+    if (op === 'verify-code') {
+      if (b.token !== lastCode) return send(res, 200, { error: 'Invalid code' });
+      session = { user: { id: UID, email: lastEmail } };
+      return send(res, 200, { session });
+    }
     if (op === 'signout') { session = null; return send(res, 200, {}); }
     if (op === 'reset')   { reset(!!b.seeded); return send(res, 200, {}); }
     if (op === 'authed')  { session = { user: { id: UID, email: 'probe@example.com' } }; return send(res, 200, {}); }

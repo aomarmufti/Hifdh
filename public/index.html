@@ -6,8 +6,8 @@
 <title>Hifdh</title>
 <meta name="description" content="Your daily Qur'an revision, worked out for you">
 <link rel="manifest" href="manifest.webmanifest">
-<meta name="theme-color" content="#faf9f6" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#F3EEE3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0A1020" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Hifdh">
@@ -19,28 +19,39 @@
 
 <div id="boot" class="boot"><div class="spinner"></div></div>
 
-<!-- ══════════ Sign in ══════════ -->
+<!-- ══════════ Sign in (only ever reached to restore an old account) ══════════ -->
 <section id="auth" class="auth" hidden>
   <div class="auth-inner">
     <div class="auth-mark" aria-hidden="true"></div>
     <h1 class="auth-title">Hifdh</h1>
     <p class="auth-sub">Your revision, worked out for you.</p>
+
     <form id="auth-form" class="auth-form">
       <input id="email" type="email" inputmode="email" autocomplete="email"
              placeholder="Email address" required aria-label="Email address">
-      <button id="auth-btn" class="btn btn-primary" type="submit">Continue</button>
+      <button id="auth-btn" class="btn btn-primary" type="submit">Email me a code</button>
     </form>
+
+    <form id="code-form" class="auth-form" hidden>
+      <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code"
+             placeholder="6-digit code" maxlength="6" aria-label="6-digit code">
+      <button id="code-btn" class="btn btn-primary" type="submit">Continue</button>
+      <button id="code-back" class="btn btn-quiet" type="button">Use a different email</button>
+    </form>
+
     <p id="auth-msg" class="auth-msg" hidden></p>
+    <button id="auth-skip" class="btn btn-quiet" type="button">Just let me start</button>
   </div>
 </section>
 
-<!-- ══════════ First run ══════════ -->
+<!-- ══════════ Setup ══════════ -->
 <section id="setup" class="setup" hidden>
   <div class="setup-inner">
     <p class="eyebrow">Set up</p>
-    <h1 class="display">What do you<br>have memorized?</h1>
-    <p class="lede">Everything else is calculated from this. You can change it whenever your pool grows.</p>
+    <h1 class="display">Two questions<br>and you're done.</h1>
+    <p class="lede">Everything else is worked out from your answers. You can change them whenever you like.</p>
 
+    <p class="q-num">1 — What have you memorised?</p>
     <div class="card">
       <div class="field">
         <label class="field-label" for="su-from">From</label>
@@ -52,17 +63,38 @@
         <select id="su-to" class="select"></select>
       </div>
     </div>
-    <p id="setup-summary" class="note"></p>
+    <p id="su-held" class="answer"></p>
 
+    <p class="q-num">2 — How many pages can you revise a day?</p>
     <div class="card">
-      <div class="field-block">
-        <span class="field-label">Lesson days</span>
-        <p class="field-hint">When you present a new page to your teacher.</p>
-        <div id="su-days" class="daypick"></div>
+      <div class="field">
+        <span class="field-label">Pages a day</span>
+        <div class="stepper" id="su-stepper">
+          <button type="button" data-d="-1" aria-label="Fewer">−</button>
+          <span class="stepper-v" id="su-pages">10</span>
+          <button type="button" data-d="1" aria-label="More">+</button>
+        </div>
+      </div>
+    </div>
+    <p id="su-cycle" class="answer answer-strong"></p>
+
+    <p class="q-num">Are you also memorising new pages?</p>
+    <div class="card">
+      <div class="field">
+        <label class="field-label" for="su-learning">Learning new pages</label>
+        <label class="switch"><input id="su-learning" type="checkbox" checked><span></span></label>
+      </div>
+      <div id="su-lesson-wrap">
+        <div class="hr"></div>
+        <div class="field-block">
+          <span class="field-label">Days you read to your teacher</span>
+          <p class="field-hint">You'll get one new page to prepare for each of these.</p>
+          <div id="su-days" class="daypick"></div>
+        </div>
       </div>
     </div>
 
-    <button id="setup-go" class="btn btn-primary btn-lg">Build my plan</button>
+    <button id="setup-go" class="btn btn-primary btn-lg">Start</button>
   </div>
 </section>
 
@@ -72,7 +104,7 @@
   <!-- ───── Today ───── -->
   <section id="view-today" class="view">
     <header class="nav">
-      <p class="nav-eyebrow" id="t-eyebrow"></p>
+      <p class="nav-eyebrow" id="t-date"></p>
       <h1 class="nav-title" id="t-greeting">Today</h1>
     </header>
 
@@ -80,29 +112,15 @@
       <div class="inspire-glow" aria-hidden="true"></div>
       <p class="inspire-body" id="insp-body"></p>
       <p class="inspire-src" id="insp-src"></p>
-      <p class="inspire-note" id="insp-note"></p>
     </article>
-
-    <div class="ring-row">
-      <div class="ring-wrap">
-        <svg class="ring" viewBox="0 0 120 120" aria-hidden="true">
-          <circle class="ring-bg" cx="60" cy="60" r="52"/>
-          <circle class="ring-fg" id="ring-fg" cx="60" cy="60" r="52"/>
-        </svg>
-        <div class="ring-mid">
-          <span class="ring-num" id="ring-num">0</span>
-          <span class="ring-lbl" id="ring-lbl">pages left</span>
-        </div>
-      </div>
-      <div class="ring-side">
-        <div class="mini"><span class="mini-n" id="m-streak">0</span><span class="mini-l">day streak</span></div>
-        <div class="mini"><span class="mini-n" id="m-known">0</span><span class="mini-l">pages held</span></div>
-        <div class="mini"><span class="mini-n" id="m-cycle">—</span><span class="mini-l">day cycle</span></div>
-      </div>
-    </div>
 
     <div id="tasks" class="tasks"></div>
     <p id="today-empty" class="empty" hidden></p>
+
+    <div id="cycle-line" class="cycle" hidden>
+      <div class="cycle-bar"><div class="cycle-fill" id="cycle-fill"></div></div>
+      <p class="cycle-text" id="cycle-text"></p>
+    </div>
   </section>
 
   <!-- ───── Plan ───── -->
@@ -111,7 +129,7 @@
 
     <div class="summary" id="plan-summary"></div>
 
-    <p class="group-label">Memorized</p>
+    <p class="group-label">What you've memorised</p>
     <div class="card">
       <div class="field">
         <label class="field-label" for="p-from">From</label>
@@ -122,94 +140,84 @@
         <label class="field-label" for="p-to">To</label>
         <select id="p-to" class="select"></select>
       </div>
-      <div class="hr"></div>
-      <div class="field-block">
-        <span class="field-label">New pages go</span>
-        <p class="field-hint">Backwards takes surahs in descending order but learns
-          each one forwards, from its first page. Forwards continues past the end.</p>
-        <div class="seg seg-wide" id="p-direction">
-          <button type="button" data-v="backward">Backwards</button>
-          <button type="button" data-v="forward">Forwards</button>
-        </div>
-      </div>
     </div>
 
-    <p class="group-label">Lessons</p>
-    <div class="card">
-      <div class="field-block">
-        <span class="field-label">Lesson days</span>
-        <div id="p-days" class="daypick"></div>
-      </div>
-      <div class="hr"></div>
-      <div class="field">
-        <span class="field-label">Pages per lesson</span>
-        <div class="stepper" data-key="new_pages_per_lesson">
-          <button type="button" data-d="-1" aria-label="Fewer">−</button>
-          <span class="stepper-v" id="v-new_pages_per_lesson">1</span>
-          <button type="button" data-d="1" aria-label="More">+</button>
-        </div>
-      </div>
-    </div>
-
-    <p class="group-label">Daily revision</p>
+    <p class="group-label">Revision</p>
     <div class="card">
       <div class="field">
-        <span class="field-label">Manzil a day</span>
-        <div class="stepper" data-key="manzil_pages_per_day">
+        <span class="field-label">Pages a day</span>
+        <div class="stepper" data-key="revision_pages_per_day">
           <button type="button" data-d="-1" aria-label="Fewer">−</button>
-          <span class="stepper-v" id="v-manzil_pages_per_day">8</span>
-          <button type="button" data-d="1" aria-label="More">+</button>
-        </div>
-      </div>
-      <div class="hr"></div>
-      <div class="field">
-        <span class="field-label">Sabqi a day</span>
-        <div class="stepper" data-key="sabqi_pages_per_day">
-          <button type="button" data-d="-1" aria-label="Fewer">−</button>
-          <span class="stepper-v" id="v-sabqi_pages_per_day">5</span>
-          <button type="button" data-d="1" aria-label="More">+</button>
-        </div>
-      </div>
-      <div class="hr"></div>
-      <div class="field">
-        <span class="field-label">Sabqi window</span>
-        <div class="stepper" data-key="sabqi_window_pages">
-          <button type="button" data-d="-1" aria-label="Fewer">−</button>
-          <span class="stepper-v" id="v-sabqi_window_pages">10</span>
+          <span class="stepper-v" id="v-revision_pages_per_day">10</span>
           <button type="button" data-d="1" aria-label="More">+</button>
         </div>
       </div>
       <div class="hr"></div>
       <div class="field-block">
-        <span class="field-label">Rest days</span>
+        <span class="field-label">Days off</span>
         <p class="field-hint">No revision scheduled. Lessons still count.</p>
         <div id="p-rest" class="daypick"></div>
+      </div>
+    </div>
+
+    <p class="group-label">New pages</p>
+    <div class="card">
+      <div class="field">
+        <label class="field-label" for="p-learning">Learning new pages</label>
+        <label class="switch"><input id="p-learning" type="checkbox"><span></span></label>
+      </div>
+      <div id="p-lesson-wrap">
+        <div class="hr"></div>
+        <div class="field-block">
+          <span class="field-label">Days you read to your teacher</span>
+          <div id="p-days" class="daypick"></div>
+        </div>
+        <div class="hr"></div>
+        <div class="field">
+          <span class="field-label">Pages per lesson</span>
+          <div class="stepper" data-key="new_pages_per_lesson">
+            <button type="button" data-d="-1" aria-label="Fewer">−</button>
+            <span class="stepper-v" id="v-new_pages_per_lesson">1</span>
+            <button type="button" data-d="1" aria-label="More">+</button>
+          </div>
+        </div>
+        <div class="hr"></div>
+        <div class="field-block">
+          <span class="field-label">New pages go</span>
+          <p class="field-hint">Backwards takes surahs in descending order but learns
+            each one forwards, from its first page. Forwards continues past the end.</p>
+          <div class="seg seg-wide" id="p-direction">
+            <button type="button" data-v="backward">Backwards</button>
+            <button type="button" data-v="forward">Forwards</button>
+          </div>
+        </div>
       </div>
     </div>
 
     <p class="group-label">Arabic</p>
     <div class="card">
       <div class="field">
-        <label class="field-label" for="p-arabic-on">Include Arabic</label>
+        <label class="field-label" for="p-arabic-on">Track Arabic study</label>
         <label class="switch"><input id="p-arabic-on" type="checkbox"><span></span></label>
       </div>
-      <div class="hr"></div>
-      <div class="field-block">
-        <label class="field-label" for="p-arabic-text">What you are studying</label>
-        <p class="field-hint">Shown as your daily Arabic task. Change it whenever you move on.</p>
-        <input id="p-arabic-text" type="text" class="inp" placeholder="Madinah Book 2, lesson 7">
-      </div>
-      <div class="hr"></div>
-      <div class="field-block">
-        <span class="field-label">Arabic days</span>
-        <div id="p-arabic-days" class="daypick"></div>
+      <div id="p-arabic-wrap">
+        <div class="hr"></div>
+        <div class="field-block">
+          <label class="field-label" for="p-arabic-text">What you're studying</label>
+          <input id="p-arabic-text" type="text" class="inp" placeholder="Madinah Book 2, lesson 7">
+        </div>
+        <div class="hr"></div>
+        <div class="field-block">
+          <span class="field-label">Days</span>
+          <div id="p-arabic-days" class="daypick"></div>
+        </div>
       </div>
     </div>
 
     <p class="group-label">Next seven days</p>
     <div id="preview" class="preview"></div>
     <p class="note">A projection from tomorrow, assuming each day is finished.
-      Today's portion is on the Today tab. Nothing here is saved until the day arrives.</p>
+      Today's portion is on the Today tab.</p>
   </section>
 
   <!-- ───── Progress ───── -->
@@ -217,7 +225,7 @@
     <header class="nav"><h1 class="nav-title">Progress</h1></header>
 
     <div class="stat-row">
-      <div class="stat"><span class="stat-n" id="s-done">0</span><span class="stat-l">complete days</span></div>
+      <div class="stat"><span class="stat-n" id="s-streak">0</span><span class="stat-l">day streak</span></div>
       <div class="stat"><span class="stat-n" id="s-rate">0%</span><span class="stat-l">last 8 weeks</span></div>
     </div>
 
@@ -247,12 +255,6 @@
       <div class="field"><label class="field-label" for="rv-weak">Weak pages</label>
         <input id="rv-weak" type="text" class="inp" placeholder="6"></div>
       <div class="hr"></div>
-      <div class="field"><label class="field-label" for="rv-arabic">Arabic pages</label>
-        <input id="rv-arabic" type="number" inputmode="numeric" min="0" class="inp"></div>
-      <div class="hr"></div>
-      <div class="field"><label class="field-label" for="rv-vocab">Vocab roots</label>
-        <input id="rv-vocab" type="number" inputmode="numeric" min="0" class="inp"></div>
-      <div class="hr"></div>
       <div class="field-block"><label class="field-label" for="rv-note">Note</label>
         <textarea id="rv-note" rows="2" class="inp" placeholder="Did this feel easier than a month ago?"></textarea></div>
       <button class="btn btn-primary" type="submit">Save review</button>
@@ -264,25 +266,42 @@
   <section id="view-more" class="view" hidden>
     <header class="nav"><h1 class="nav-title">More</h1></header>
 
-    <p class="group-label">Reminder</p>
+    <p class="group-label">Daily reminder</p>
     <div class="card">
       <div class="field">
-        <label class="field-label" for="set-remind">Daily nudge</label>
+        <label class="field-label" for="set-remind">Remind me at</label>
         <input id="set-remind" type="time" class="inp inp-time">
       </div>
       <div class="hr"></div>
       <div class="field-block">
         <p class="field-hint" id="remind-status"></p>
-        <button id="remind-save" class="btn" type="button">Save reminder</button>
+        <button id="remind-save" class="btn" type="button">Turn on reminders</button>
       </div>
     </div>
 
-    <p class="group-label">Account</p>
-    <div class="card">
-      <div class="field"><span class="field-label">Signed in</span>
-        <span class="field-value" id="set-email"></span></div>
-      <div class="hr"></div>
-      <div class="field-block">
+    <p class="group-label">Your account</p>
+    <div class="card" id="account-card">
+      <div class="field-block" id="account-anon">
+        <p class="field-hint">Your progress is saved on this device. Add an email to
+          keep it if you lose the phone, or to use Hifdh on another device.</p>
+        <form id="link-form">
+          <input id="link-email" type="email" inputmode="email" class="inp"
+                 placeholder="you@example.com" aria-label="Email address">
+          <button class="btn" type="submit" id="link-btn">Save my progress</button>
+        </form>
+        <form id="link-code-form" hidden>
+          <input id="link-code" type="text" inputmode="numeric" class="inp"
+                 placeholder="6-digit code" maxlength="6" aria-label="6-digit code">
+          <button class="btn btn-primary" type="submit">Confirm</button>
+        </form>
+        <p id="link-msg" class="field-hint" hidden></p>
+      </div>
+      <div class="field" id="account-known" hidden>
+        <span class="field-label">Signed in</span>
+        <span class="field-value" id="set-email"></span>
+      </div>
+      <div class="hr" id="account-hr" hidden></div>
+      <div class="field-block" id="account-signout" hidden>
         <button id="signout" class="btn btn-quiet" type="button">Sign out</button>
       </div>
     </div>
@@ -290,7 +309,6 @@
     <p class="note">Page numbers follow the standard 604-page Madani mushaf.</p>
   </section>
 
-  <!-- ───── Tab bar ───── -->
   <nav class="tabbar" id="tabs"></nav>
 </main>
 

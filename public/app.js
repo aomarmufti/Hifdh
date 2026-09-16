@@ -5,8 +5,8 @@ import {
   isNative, nativePermission, scheduleNativeReminders, cancelNativeReminders, tapFeedback
 } from './lib/native.js';
 import {
-  DEFAULT_CONFIG, planDay, absorbSabaq, undoSabaq, cycleLengthDays, preview,
-  memorizedPages, totalPages, describeRuns, activeSurah, nextNewPages
+  DEFAULT_CONFIG, planDay, absorbNew, undoNew, cycleLengthDays, cyclePosition,
+  preview, totalPages, describeRuns, activeSurah, nextNewPages
 } from './lib/engine.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
@@ -27,6 +27,17 @@ const isoDay = (d = new Date()) => (d.getDay() === 0 ? 7 : d.getDay());
 const addDays = (d, n) => { const c = new Date(d); c.setDate(c.getDate()+n); return c; };
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
   (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const camel = (k) => k.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+
+// Plain English first; the traditional term kept as a quiet subtitle for those
+// who know it. Nobody should have to learn a word to use this.
+const KINDS = {
+  new:      { label: 'New page', arabic: 'Sabaq',      cls: 'k-new' },
+  revision: { label: 'Revision', arabic: 'Murājaʿah', cls: 'k-revision' },
+  arabic:   { label: 'Arabic',   arabic: '',            cls: 'k-arabic' }
+};
+const ORDER = { new: 0, revision: 1, arabic: 2 };
 
 const ICONS = {
   today:    'M3 9h18M7 3v3m10-3v3M5 21h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z',
@@ -57,10 +68,11 @@ const buzz = (ms) => {
 /* ══════════════════════ state ══════════════════════ */
 const state = {
   user: null,
+  anonymous: false,
   config: { ...DEFAULT_CONFIG },
-  progress: null,          // { memFrom, memTo, sabqiCursor, manzilCursor, lastPlanned }
-  tasks: [],               // today's tasks
-  history: {},             // dateKey -> { total, done }
+  progress: null,
+  tasks: [],
+  history: {},
   reviews: [],
   settings: {},
   inspirations: [],
@@ -69,8 +81,7 @@ const state = {
 };
 
 /* ══════════════════════ offline outbox ══════════════════════ */
-// Postgres is the source of truth; this only survives a dead tunnel.
-const QKEY = 'hifdh.outbox.v2';
+const QKEY = 'hifdh.outbox.v3';
 let outbox = [];
 try { outbox = JSON.parse(localStorage.getItem(QKEY) || '[]'); } catch { outbox = []; }
 let flushing = false;
@@ -83,12 +94,8 @@ function enqueue(op) {
   flush();
 }
 async function runOp(op) {
-  if (op.type === 'upsert') {
-    return sb.from(op.table).upsert(op.row, { onConflict: op.onConflict });
-  }
-  if (op.type === 'update') {
-    return sb.from(op.table).update(op.row).eq('id', op.rowId);
-  }
+  if (op.type === 'upsert') return sb.from(op.table).upsert(op.row, { onConflict: op.onConflict });
+  if (op.type === 'update') return sb.from(op.table).update(op.row).eq('id', op.rowId);
   return { error: null };
 }
 async function flush() {
@@ -109,11 +116,9 @@ const cfgFromRow = (r) => ({
   direction: r.direction,
   lessonDays: r.lesson_days || [],
   newPagesPerLesson: r.new_pages_per_lesson,
-  sabqiWindowPages: r.sabqi_window_pages,
-  sabqiPagesPerDay: r.sabqi_pages_per_day,
-  manzilPagesPerDay: r.manzil_pages_per_day,
+  revisionPagesPerDay: r.revision_pages_per_day,
   restDays: r.rest_days || [],
-  arabicEnabled: r.arabic_enabled !== false,
+  arabicEnabled: r.arabic_enabled === true,
   arabicText: r.arabic_text || '',
   arabicDays: r.arabic_days || [1,2,3,4,5,6,7]
 });
@@ -122,9 +127,7 @@ const cfgToRow = (c) => ({
   direction: c.direction,
   lesson_days: c.lessonDays,
   new_pages_per_lesson: c.newPagesPerLesson,
-  sabqi_window_pages: c.sabqiWindowPages,
-  sabqi_pages_per_day: c.sabqiPagesPerDay,
-  manzil_pages_per_day: c.manzilPagesPerDay,
+  revision_pages_per_day: c.revisionPagesPerDay,
   rest_days: c.restDays,
   arabic_enabled: c.arabicEnabled,
   arabic_text: c.arabicText,
@@ -135,18 +138,14 @@ const progToRow = (p) => ({
   user_id: state.user.id,
   mem_from: p.memFrom, mem_to: p.memTo,
   partial_from: p.partialFrom ?? null, partial_to: p.partialTo ?? null,
-  sabqi_cursor: p.sabqiCursor, manzil_cursor: p.manzilCursor,
+  revision_cursor: p.revisionCursor,
   last_planned_date: p.lastPlanned,
   updated_at: new Date().toISOString()
 });
-function saveConfig() {
-  enqueue({ id: 'config', type: 'upsert', table: 'plan_config',
-            row: cfgToRow(state.config), onConflict: 'user_id' });
-}
-function saveProgress() {
-  enqueue({ id: 'progress', type: 'upsert', table: 'progress',
-            row: progToRow(state.progress), onConflict: 'user_id' });
-}
+const saveConfig = () => enqueue({ id: 'config', type: 'upsert', table: 'plan_config',
+                                   row: cfgToRow(state.config), onConflict: 'user_id' });
+const saveProgress = () => enqueue({ id: 'progress', type: 'upsert', table: 'progress',
+                                     row: progToRow(state.progress), onConflict: 'user_id' });
 
 /* ══════════════════════ load ══════════════════════ */
 async function loadAll() {
@@ -164,7 +163,7 @@ async function loadAll() {
   state.progress = prog.data ? {
     memFrom: prog.data.mem_from, memTo: prog.data.mem_to,
     partialFrom: prog.data.partial_from, partialTo: prog.data.partial_to,
-    sabqiCursor: prog.data.sabqi_cursor, manzilCursor: prog.data.manzil_cursor,
+    revisionCursor: prog.data.revision_cursor,
     lastPlanned: prog.data.last_planned_date
   } : null;
 
@@ -172,8 +171,6 @@ async function loadAll() {
   state.settings = settings.data || {};
   state.inspirations = insp.data || [];
 
-  // Every row counts toward its own date, carried-away ones included: a day you
-  // left work on should read as incomplete, and the copy lives on a later date.
   const all = tasks.data || [];
   state.tasks = all.filter((t) => t.task_date === dateKey() && !t.carried_away);
   state.history = {};
@@ -183,21 +180,13 @@ async function loadAll() {
   }
 }
 
-/* ══════════════════════ the day ══════════════════════
-   Carry anything unfinished forward, then plan today once.
-   Days the app was never opened generate nothing, so a week away
-   does not return as a week of backlog.
-   ═══════════════════════════════════════════════════ */
+/* ══════════════════════ the day ══════════════════════ */
 async function ensureDayPlanned() {
   const today = dateKey();
   if (!state.progress) return;
 
-  // 1. Carry unfinished work forward onto today.
-  //
-  // The original row stays on its own date and is flagged carried_away; a copy
-  // is made for today. Moving the row instead would erase the fact that the
-  // earlier day had work left undone, and the heatmap would score a missed day
-  // as a complete one.
+  // Carry unfinished work forward. The original row stays on its own date and
+  // is flagged, so a day you left work on still reads as incomplete.
   const { data: stale } = await sb.from('daily_tasks').select('*')
     .eq('done', false).eq('carried_away', false).lt('task_date', today);
   if (stale && stale.length) {
@@ -210,25 +199,21 @@ async function ensureDayPlanned() {
     })));
   }
 
-  // 2. Plan today, once.
   if (state.progress.lastPlanned !== today) {
     const { tasks, next } = planDay(state.progress, state.config, isoDay());
     if (tasks.length) {
-      const rows = tasks.map((t) => ({
+      const { error } = await sb.from('daily_tasks').insert(tasks.map((t) => ({
         user_id: state.user.id, task_date: today, kind: t.kind,
         page_from: t.from, page_to: t.to, pages: t.pages, label: t.label
-      }));
-      const { error } = await sb.from('daily_tasks').insert(rows);
+      })));
       if (error) { console.error('could not plan today', error); return; }
     }
     state.progress = { ...next, lastPlanned: today };
     saveProgress();
   }
-
   await refreshToday();
 }
 
-// Today's working set excludes anything already carried away.
 async function refreshToday() {
   const today = dateKey();
   const { data } = await sb.from('daily_tasks').select('*')
@@ -239,36 +224,43 @@ async function refreshToday() {
   h.done = state.tasks.filter((t) => t.done).length;
 }
 
-// A settings change should show up in today's portion straight away. Undone
-// generated rows are dropped and the cursors rewound to where they started
-// (a chunk's first page IS the cursor before it was taken), then replanned.
+// A settings change should show in today's portion straight away. Undone rows
+// are dropped and the cursor rewound to where it started, then replanned.
 async function regenerateToday() {
   const today = dateKey();
   const mine = state.tasks.filter((t) => !t.carried_from);
   const undone = mine.filter((t) => !t.done);
-  if (!undone.length && mine.length) return;   // nothing to redo
+  const doneKinds = new Set(mine.filter((t) => t.done).map((t) => t.kind));
 
+  // Rewind only the cursors belonging to work that has NOT been done: a chunk's
+  // first page is exactly where the cursor stood before it was taken.
   const rewound = { ...state.progress };
   for (const t of undone) {
     const first = (t.pages && t.pages.length) ? t.pages[0] : t.page_from;
-    if (t.kind === 'manzil') rewound.manzilCursor = first;
-    if (t.kind === 'sabqi')  rewound.sabqiCursor  = first;
-  }
-  if (undone.length) {
-    await sb.from('daily_tasks').delete().in('id', undone.map((t) => t.id));
+    if (t.kind === 'revision') rewound.revisionCursor = first;
   }
 
-  // Don't re-issue a kind that was already completed today.
-  const doneKinds = new Set(mine.filter((t) => t.done).map((t) => t.kind));
   const { tasks, next } = planDay(rewound, state.config, isoDay());
+  // Anything already finished today stays finished; a kind that has appeared
+  // because the plan changed (adding a lesson day, say) still gets scheduled.
   const fresh = tasks.filter((t) => !doneKinds.has(t.kind));
+  if (!undone.length && !fresh.length) return;
+
+  if (undone.length) await sb.from('daily_tasks').delete().in('id', undone.map((t) => t.id));
   if (fresh.length) {
     await sb.from('daily_tasks').insert(fresh.map((t) => ({
       user_id: state.user.id, task_date: today, kind: t.kind,
       page_from: t.from, page_to: t.to, pages: t.pages, label: t.label
     })));
   }
-  state.progress = { ...next, lastPlanned: today };
+
+  // Only advance the revision cursor if the revision portion was actually
+  // re-issued. If it was already done, it must stay where it is or a day's
+  // worth of pages would be silently skipped.
+  const reissuedRevision = fresh.some((t) => t.kind === 'revision');
+  state.progress = reissuedRevision
+    ? { ...next, lastPlanned: today }
+    : { ...state.progress, lastPlanned: today };
   saveProgress();
   await refreshToday();
 }
@@ -277,21 +269,18 @@ async function regenerateToday() {
 function todaysInspiration() {
   const n = state.inspirations.length;
   if (!n) return null;
-  // Stable for the whole day, moves on at midnight.
   const days = Math.floor(parseKey(dateKey()).getTime() / 86400000);
   return state.inspirations[((days % n) + n) % n];
 }
 
 function greeting() {
   const h = new Date().getHours();
-  if (h < 12) return 'Good morning';
-  if (h < 17) return 'Good afternoon';
-  return 'Good evening';
+  return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
 }
 
 function renderToday() {
   const now = new Date();
-  $('t-eyebrow').textContent =
+  $('t-date').textContent =
     `${DAYS_LONG[isoDay(now)-1]} · ${now.toLocaleDateString(undefined,{day:'numeric',month:'long'})}`;
   $('t-greeting').textContent = greeting();
 
@@ -299,41 +288,13 @@ function renderToday() {
   if (ins) {
     $('insp-body').textContent = ins.body;
     $('insp-src').textContent = ins.source;
-    $('insp-note').textContent = ins.encouragement || '';
-    $('insp-note').hidden = !ins.encouragement;
     $('inspire').hidden = false;
   } else { $('inspire').hidden = true; }
 
-  // Ring: pages remaining today.
-  const pagesOf = (t) => (t.pages && t.pages.length ? t.pages.length
-                        : (t.kind === 'arabic' ? 0 : t.page_to - t.page_from + 1));
-  const total = state.tasks.reduce((a, t) => a + pagesOf(t), 0);
-  const left  = state.tasks.filter((t) => !t.done).reduce((a, t) => a + pagesOf(t), 0);
-  const frac  = total ? (total - left) / total : 0;
-  const C = 2 * Math.PI * 52;
-  $('ring-fg').style.strokeDashoffset = String(C * (1 - frac));
-  $('ring-num').textContent = total === 0 ? '—' : (left === 0 ? '✓' : left);
-  $('ring-lbl').textContent = total === 0 ? 'nothing due'
-                            : (left === 0 ? 'all done' : (left === 1 ? 'page left' : 'pages left'));
-
-  $('m-streak').textContent = streak();
-  $('m-known').textContent = state.progress ? totalPages(state.progress) : 0;
-  const cyc = state.progress ? cycleLengthDays(state.progress, state.config) : null;
-  $('m-cycle').textContent = cyc ? cyc.revisionDays : '—';
-
-  const KIND = {
-    sabaq:  { label: 'New page', cls: 'k-sabaq' },
-    sabqi:  { label: 'Sabqi',    cls: 'k-sabqi' },
-    manzil: { label: 'Manzil',   cls: 'k-manzil' },
-    arabic: { label: 'Arabic',   cls: 'k-arabic' }
-  };
-  const order = { sabaq: 0, sabqi: 1, manzil: 2, arabic: 3 };
-  const sorted = [...state.tasks].sort((a,b) => order[a.kind] - order[b.kind]);
-
+  const sorted = [...state.tasks].sort((a,b) => ORDER[a.kind] - ORDER[b.kind]);
   $('tasks').innerHTML = sorted.map((t) => {
-    const k = KIND[t.kind];
-    // Rows written before the pages column existed, or carried copies of them,
-    // still have a span - fall back to it so a range is always shown.
+    const k = KINDS[t.kind] || { label: t.kind, arabic: '', cls: '' };
+
     let pageList = (t.pages && t.pages.length) ? t.pages : [];
     if (!pageList.length && t.kind !== 'arabic' && t.page_to >= t.page_from) {
       for (let p = t.page_from; p <= t.page_to; p++) pageList.push(p);
@@ -343,8 +304,6 @@ function renderToday() {
     const carried = t.carried_from
       ? `<span class="chip">From ${DAYS_SHORT[isoDay(parseKey(t.carried_from))-1]}</span>` : '';
 
-    // A portion can straddle the gap left by a surah in progress. Each
-    // contiguous run gets its own line rather than one misleading span.
     let body;
     if (!runs.length) {
       body = `<span class="task-name">${esc(t.label)}</span>`;
@@ -358,7 +317,7 @@ function renderToday() {
         const range = r.from === r.to ? `p.${r.from}` : `p.${r.from}–${r.to}`;
         return `<span class="task-run"><span class="task-run-name">${esc(r.label)}</span>
                   <span class="task-run-pages">${range}</span></span>`;
-      }).join('') + `<span class="task-meta">${n} pages across ${runs.length} stretches</span>`;
+      }).join('') + `<span class="task-meta">${n} pages in two parts</span>`;
     }
 
     return `
@@ -366,7 +325,11 @@ function renderToday() {
               data-id="${t.id}" type="button" aria-pressed="${t.done}">
         <span class="tick">${svg(ICONS.check)}</span>
         <span class="task-body">
-          <span class="task-top"><span class="kind ${k.cls}">${k.label}</span>${carried}</span>
+          <span class="task-top">
+            <span class="kind ${k.cls}">${k.label}</span>
+            ${k.arabic ? `<span class="kind-ar">${k.arabic}</span>` : ''}
+            ${carried}
+          </span>
           ${body}
         </span>
       </button>`;
@@ -375,16 +338,17 @@ function renderToday() {
   const none = state.tasks.length === 0;
   $('today-empty').hidden = !none;
   $('today-empty').textContent = state.config.restDays.includes(isoDay())
-    ? 'Rest day. Nothing scheduled.' : 'Nothing due today.';
-}
+    ? 'A day off. Nothing scheduled.' : 'Nothing due today.';
 
-function streak() {
-  let n = 0;
-  let c = new Date();
-  const full = (k) => { const h = state.history[k]; return h && h.total > 0 && h.done === h.total; };
-  if (!full(dateKey(c))) c = addDays(c, -1);
-  while (full(dateKey(c))) { n++; c = addDays(c, -1); }
-  return n;
+  // One quiet line: the promise, and how far through it you are.
+  const pos = state.progress ? cyclePosition(state.progress, state.config) : null;
+  const cyc = state.progress ? cycleLengthDays(state.progress, state.config) : null;
+  if (pos && cyc) {
+    $('cycle-line').hidden = false;
+    $('cycle-fill').style.width = `${Math.round(pos.fraction * 100)}%`;
+    $('cycle-text').textContent =
+      `${pos.done} of ${pos.total} pages this round · everything every ${cyc.revisionDays} days`;
+  } else { $('cycle-line').hidden = true; }
 }
 
 $('tasks').addEventListener('click', async (e) => {
@@ -400,24 +364,23 @@ $('tasks').addEventListener('click', async (e) => {
   const h = state.history[dateKey()] || (state.history[dateKey()] = { total: state.tasks.length, done: 0 });
   h.done = state.tasks.filter((x) => x.done).length;
 
-  // Finishing the new page is what actually grows what you hold. Apply it
-  // before painting, so the pages-held figure is never a step behind.
-  if (t.kind === 'sabaq') {
+  // Finishing a new page is what grows what you hold. Apply before painting so
+  // nothing on screen is a step behind.
+  if (t.kind === 'new') {
     const moved = t.done
-      ? absorbSabaq(state.progress, state.config, t.page_from, t.page_to)
-      : undoSabaq(state.progress, state.config, t.page_from, t.page_to);
+      ? absorbNew(state.progress, state.config, t.page_from, t.page_to)
+      : undoNew(state.progress, state.config, t.page_from, t.page_to);
     state.progress = { ...moved, lastPlanned: state.progress.lastPlanned };
     saveProgress();
   }
 
   renderToday();
-
   enqueue({ id: `task:${t.id}`, type: 'update', table: 'daily_tasks',
             rowId: t.id, row: { done: t.done, done_at: t.done_at } });
-  if (t.kind === 'sabaq' && t.done) toast('Added to your rotation');
+  if (t.kind === 'new' && t.done) toast('Added to your revision');
 });
 
-/* ══════════════════════ Plan ══════════════════════ */
+/* ══════════════════════ shared controls ══════════════════════ */
 function surahOptions(sel, value) {
   sel.innerHTML = SURAHS.map((s) =>
     `<option value="${s.n}" ${s.n===value?'selected':''}>${s.n}. ${esc(s.name)}</option>`).join('');
@@ -430,105 +393,81 @@ function dayButtons(host, selected, onToggle) {
     if (b) onToggle(Number(b.dataset.d));
   };
 }
+const toggleDay = (list, d) =>
+  list.includes(d) ? list.filter((x) => x !== d) : [...list, d].sort();
 
-function renderPlan() {
-  const p = state.progress, c = state.config;
-
-  // Range pickers reflect the surahs the page range currently covers.
-  const cur = currentSurahRange();
-  surahOptions($('p-from'), cur.from);
-  surahOptions($('p-to'), cur.to);
-
-  for (const btn of $('p-direction').children) btn.classList.toggle('on', btn.dataset.v === c.direction);
-  dayButtons($('p-days'), c.lessonDays, (d) => {
-    c.lessonDays = c.lessonDays.includes(d) ? c.lessonDays.filter((x)=>x!==d) : [...c.lessonDays, d].sort();
-    commitPlan();
-  });
-  dayButtons($('p-rest'), c.restDays, (d) => {
-    c.restDays = c.restDays.includes(d) ? c.restDays.filter((x)=>x!==d) : [...c.restDays, d].sort();
-    commitPlan();
-  });
-  for (const key of ['new_pages_per_lesson','manzil_pages_per_day','sabqi_pages_per_day','sabqi_window_pages']) {
-    $('v-' + key).textContent = c[camel(key)];
-  }
-
-  $('p-arabic-on').checked = c.arabicEnabled;
-  $('p-arabic-text').value = c.arabicText;
-  dayButtons($('p-arabic-days'), c.arabicDays, (d) => {
-    c.arabicDays = c.arabicDays.includes(d)
-      ? c.arabicDays.filter((x) => x !== d) : [...c.arabicDays, d].sort();
-    commitPlan();
-  });
-
-  // Headline: what this configuration actually means.
-  const cyc = cycleLengthDays(p, c);
-  const held = totalPages(p);
-  const perWeek = c.lessonDays.length * c.newPagesPerLesson;
-  const next = nextNewPages(p, c);
-  const active = activeSurah(p, c);
-  const weekly = `${perWeek} new page${perWeek===1?'':'s'} a week`;
-  const learning = next && active
-    ? `Now learning ${esc(active.name)} · ${weekly}`
-    : `${weekly} from ${c.lessonDays.length} lesson${c.lessonDays.length===1?'':'s'}`;
-  $('plan-summary').innerHTML = `
-    <p class="summary-big">Everything every ${cyc ? cyc.revisionDays : '—'} days</p>
-    <p class="summary-sub">${held} pages held · ${esc(labelForPages(p.memFrom, p.memTo))}<br>
-      ${learning}</p>`;
-
-  renderPreview();
-}
-
-const camel = (k) => k.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
-
+/* ══════════════════════ Plan ══════════════════════ */
 function currentSurahRange() {
   const p = state.progress;
   const list = surahsInPages(p.memFrom, p.memTo);
-  return list.length
-    ? { from: list[0].n, to: list[list.length - 1].n }
-    : { from: 44, to: 114 };
+  return list.length ? { from: list[0].n, to: list[list.length-1].n } : { from: 44, to: 114 };
 }
 
-// Setting the range by hand replaces everything, including any surah that was
-// part-learned - there is no sensible way to keep a prefix of a surah that may
-// no longer be adjacent to the block.
 function setRange(fromSurah, toSurah) {
   const r = pagesForSurahRange(fromSurah, toSurah);
   const p = state.progress;
   state.progress = { ...p, memFrom: r.from, memTo: r.to,
     partialFrom: null, partialTo: null,
-    sabqiCursor: clamp(p.sabqiCursor, r.from, r.to),
-    manzilCursor: clamp(p.manzilCursor, r.from, r.to) };
+    revisionCursor: clamp(p.revisionCursor, r.from, r.to) };
   saveProgress();
 }
 
+function renderPlan() {
+  const p = state.progress, c = state.config;
+  const cur = currentSurahRange();
+  surahOptions($('p-from'), cur.from);
+  surahOptions($('p-to'), cur.to);
+
+  $('v-revision_pages_per_day').textContent = c.revisionPagesPerDay;
+  $('v-new_pages_per_lesson').textContent = c.newPagesPerLesson;
+
+  const learning = c.lessonDays.length > 0 && c.newPagesPerLesson > 0;
+  $('p-learning').checked = learning;
+  $('p-lesson-wrap').hidden = !learning;
+  $('p-arabic-on').checked = c.arabicEnabled;
+  $('p-arabic-wrap').hidden = !c.arabicEnabled;
+  $('p-arabic-text').value = c.arabicText;
+
+  for (const b of $('p-direction').children) b.classList.toggle('on', b.dataset.v === c.direction);
+  dayButtons($('p-days'), c.lessonDays, (d) => { c.lessonDays = toggleDay(c.lessonDays, d); commitPlan(); });
+  dayButtons($('p-rest'), c.restDays, (d) => { c.restDays = toggleDay(c.restDays, d); commitPlan(); });
+  dayButtons($('p-arabic-days'), c.arabicDays, (d) => { c.arabicDays = toggleDay(c.arabicDays, d); commitPlan(); });
+
+  const cyc = cycleLengthDays(p, c);
+  const held = totalPages(p);
+  const next = nextNewPages(p, c);
+  const active = activeSurah(p, c);
+  const perWeek = c.lessonDays.length * c.newPagesPerLesson;
+  const line2 = learning && next && active
+    ? `Now learning ${esc(active.name)} · ${perWeek} new page${perWeek===1?'':'s'} a week`
+    : 'Revision only';
+
+  $('plan-summary').innerHTML = `
+    <p class="summary-big">Everything every ${cyc ? cyc.revisionDays : '—'} days</p>
+    <p class="summary-sub">${held} pages · ${esc(labelForPages(p.memFrom, p.memTo))}<br>${line2}</p>`;
+
+  renderPreview();
+}
+
 function renderPreview() {
-  // The stored cursors have already advanced past today's portion, so a preview
-  // from here begins with tomorrow. Today is on the Today tab; labelling this
-  // row "Today" would show tomorrow's pages under today's name.
   const tomorrow = isoDay() === 7 ? 1 : isoDay() + 1;
-  const rows = preview(state.progress, state.config, tomorrow, 7);
-  $('preview').innerHTML = rows.map((d, i) => {
+  $('preview').innerHTML = preview(state.progress, state.config, tomorrow, 7).map((d, i) => {
     const name = i === 0 ? 'Tomorrow' : DAYS_LONG[d.isoWeekday - 1];
-    const lesson = d.tasks.some((t) => t.kind === 'sabaq');
-    const quran = d.tasks.filter((t) => t.kind !== 'arabic');
+    const lesson = d.tasks.some((t) => t.kind === 'new');
     if (!d.tasks.length) {
-      return `<div class="pv"><div class="pv-day">${name}</div>
-              <div class="pv-rest">Rest day</div></div>`;
+      return `<div class="pv"><div class="pv-day">${name}</div><div class="pv-rest">Day off</div></div>`;
     }
     const lines = d.tasks.map((t) => {
-      const kind = t.kind === 'sabaq' ? 'New' : t.kind;
       const range = t.kind === 'arabic' ? ''
         : ` · ${t.from === t.to ? `p.${t.from}` : `p.${t.from}–${t.to}`}`;
-      return `<div class="pv-line"><span class="pv-k">${kind}</span>
+      return `<div class="pv-line"><span class="pv-k">${KINDS[t.kind].label}</span>
                 <span><span class="pv-t">${esc(t.label)}</span>
                 <span class="pv-p">${range}</span></span></div>`;
     }).join('');
-    const rest = !quran.length ? '<div class="pv-rest">Qur\u2019an rest day</div>' : '';
-    return `<div class="pv"><div class="pv-day ${lesson?'is-lesson':''}">${name}${lesson?' · Lesson':''}</div>${rest}${lines}</div>`;
+    return `<div class="pv"><div class="pv-day ${lesson?'is-lesson':''}">${name}${lesson?' · Lesson':''}</div>${lines}</div>`;
   }).join('');
 }
 
-// Every plan control funnels through here: persist, re-plan today, repaint.
 let commitT;
 async function commitPlan() {
   saveConfig();
@@ -537,7 +476,6 @@ async function commitPlan() {
   commitT = setTimeout(async () => {
     await regenerateToday();
     if (state.view === 'today') renderToday();
-    // Changing pages-per-day changes what the reminder should say.
     if (isNative() && state.pushReady && state.settings.reminder_time) {
       try { await scheduleNativeReminders(state.settings.reminder_time.slice(0,5), reminderBodies()); }
       catch (e) { console.warn('reschedule failed', e); }
@@ -545,6 +483,14 @@ async function commitPlan() {
   }, 400);
 }
 
+$('p-learning').addEventListener('change', (e) => {
+  // Turning learning off means no lesson days; turning it back on restores a
+  // sensible default rather than leaving an empty, silently-broken state.
+  state.config.lessonDays = e.target.checked
+    ? (state.config.lessonDays.length ? state.config.lessonDays : [1, 5]) : [];
+  if (e.target.checked && state.config.newPagesPerLesson < 1) state.config.newPagesPerLesson = 1;
+  commitPlan();
+});
 $('p-arabic-on').addEventListener('change', (e) => {
   state.config.arabicEnabled = e.target.checked;
   commitPlan();
@@ -553,31 +499,27 @@ let arabicT;
 $('p-arabic-text').addEventListener('input', (e) => {
   state.config.arabicText = e.target.value;
   clearTimeout(arabicT);
-  arabicT = setTimeout(() => commitPlan(), 500);
+  arabicT = setTimeout(commitPlan, 500);
 });
-
 $('p-direction').addEventListener('click', (e) => {
   const b = e.target.closest('[data-v]');
   if (!b) return;
   state.config.direction = b.dataset.v;
   commitPlan();
 });
-
-for (const el of document.querySelectorAll('.stepper')) {
+for (const el of document.querySelectorAll('#view-plan .stepper')) {
   el.addEventListener('click', (e) => {
     const b = e.target.closest('[data-d]');
     if (!b) return;
     const key = camel(el.dataset.key);
-    const lim = { newPagesPerLesson: [0,10], manzilPagesPerDay: [0,60],
-                  sabqiPagesPerDay: [0,60], sabqiWindowPages: [0,120] }[key];
-    const v = Math.min(lim[1], Math.max(lim[0], state.config[key] + Number(b.dataset.d)));
+    const lim = { revisionPagesPerDay: [1, 60], newPagesPerLesson: [1, 10] }[key];
+    const v = clamp(state.config[key] + Number(b.dataset.d), lim[0], lim[1]);
     if (v === state.config[key]) return;
     state.config[key] = v;
     buzz(6);
     commitPlan();
   });
 }
-
 for (const id of ['p-from','p-to']) {
   $(id).addEventListener('change', () => {
     let a = Number($('p-from').value), b = Number($('p-to').value);
@@ -586,9 +528,16 @@ for (const id of ['p-from','p-to']) {
     commitPlan();
   });
 }
-const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /* ══════════════════════ Progress ══════════════════════ */
+function streak() {
+  let n = 0, c = new Date();
+  const full = (k) => { const h = state.history[k]; return h && h.total > 0 && h.done === h.total; };
+  if (!full(dateKey(c))) c = addDays(c, -1);
+  while (full(dateKey(c))) { n++; c = addDays(c, -1); }
+  return n;
+}
+
 function renderProgress() {
   const WEEKS = 8, today = new Date(), todayK = dateKey(today);
   const end = addDays(today, 7 - isoDay(today));
@@ -602,10 +551,7 @@ function renderProgress() {
       const day = addDays(start, w*7 + d), k = dateKey(day);
       const h = state.history[k];
       let lv = 0;
-      if (h && h.total) {
-        const f = h.done / h.total;
-        lv = f === 0 ? 0 : f < .5 ? 1 : f < 1 ? 2 : 3;
-      }
+      if (h && h.total) { const f = h.done / h.total; lv = f === 0 ? 0 : f < .5 ? 1 : f < 1 ? 2 : 3; }
       const label = day.toLocaleDateString(undefined,{day:'numeric',month:'short'});
       html += `<button class="cell l${lv} ${k>todayK?'is-future':''}" type="button"
                  data-k="${k}" data-day="${esc(label)}" data-n="${k>todayK?-1:(h?h.done:0)}"
@@ -620,7 +566,7 @@ function renderProgress() {
     const h = state.history[dateKey(addDays(today, -i))];
     if (h && h.total) { tracked++; if (h.done === h.total) done++; }
   }
-  $('s-done').textContent = done;
+  $('s-streak').textContent = streak();
   $('s-rate').textContent = tracked ? Math.round(done/tracked*100) + '%' : '0%';
 
   if (!$('rv-date').value) $('rv-date').value = dateKey();
@@ -660,7 +606,7 @@ function renderChart() {
   const y = (v) => P.t + ih - (v/top)*ih;
 
   const css = getComputedStyle(document.body);
-  const accent = css.getPropertyValue('--accent').trim();
+  const sage = css.getPropertyValue('--sage').trim();
   const line = css.getPropertyValue('--line').trim();
   const ink3 = css.getPropertyValue('--ink-3').trim();
   const surface = css.getPropertyValue('--surface').trim();
@@ -671,7 +617,7 @@ function renderChart() {
   const path = pts.map((p,i) => `${i?'L':'M'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
   const dots = pts.map((p,i) =>
     `<circle cx="${x(i).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="3.6"
-             fill="${accent}" stroke="${surface}" stroke-width="2"/>`).join('');
+             fill="${sage}" stroke="${surface}" stroke-width="2"/>`).join('');
   const ends = [0, pts.length-1].map((i) =>
     `<text x="${x(i).toFixed(1)}" y="${H-5}" text-anchor="${i?'end':'start'}"
            font-size="9.5" fill="${ink3}">${esc(parseKey(pts[i].date)
@@ -681,10 +627,10 @@ function renderChart() {
     <svg viewBox="0 0 ${W} ${H}" role="img"
          aria-label="Zero-hesitation pages across ${pts.length} reviews">
       ${grid}
-      <path d="${path}" fill="none" stroke="${accent}" stroke-width="2.2"
+      <path d="${path}" fill="none" stroke="${sage}" stroke-width="2.2"
             stroke-linecap="round" stroke-linejoin="round"/>
       ${dots}${ends}
-      <line id="cross" x1="0" x2="0" y1="${P.t}" y2="${P.t+ih}" stroke="${accent}"
+      <line id="cross" x1="0" x2="0" y1="${P.t}" y2="${P.t+ih}" stroke="${sage}"
             stroke-width="1" opacity="0"/>
     </svg><div class="tip" id="tip" hidden></div>`;
 
@@ -714,8 +660,6 @@ function renderReviews() {
     const bits = [];
     if (r.zero_hesitation_pages) bits.push(`Zero hesitation ${esc(r.zero_hesitation_pages)}`);
     if (r.weak_pages) bits.push(`Weak ${esc(r.weak_pages)}`);
-    if (r.arabic_pages_completed != null) bits.push(`Arabic ${r.arabic_pages_completed}p`);
-    if (r.vocab_roots_logged != null) bits.push(`${r.vocab_roots_logged} roots`);
     return `<div class="review-item">
       <div class="review-date">${esc(parseKey(r.review_date)
         .toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'}))}</div>
@@ -726,14 +670,11 @@ function renderReviews() {
 
 $('review-form').addEventListener('submit', (e) => {
   e.preventDefault();
-  const num = (v) => (v === '' ? null : Number(v));
   const row = {
     user_id: state.user.id,
     review_date: $('rv-date').value,
     zero_hesitation_pages: $('rv-zero').value.trim(),
     weak_pages: $('rv-weak').value.trim(),
-    arabic_pages_completed: num($('rv-arabic').value),
-    vocab_roots_logged: num($('rv-vocab').value),
     note: $('rv-note').value.trim(),
     updated_at: new Date().toISOString()
   };
@@ -742,19 +683,12 @@ $('review-form').addEventListener('submit', (e) => {
   state.reviews.sort((a,b) => b.review_date.localeCompare(a.review_date));
   enqueue({ id: `review:${row.review_date}`, type: 'upsert', table: 'weekly_review',
             row, onConflict: 'user_id,review_date' });
-  for (const id of ['rv-zero','rv-weak','rv-arabic','rv-vocab','rv-note']) $(id).value = '';
+  for (const id of ['rv-zero','rv-weak','rv-note']) $(id).value = '';
   renderProgress();
   toast('Review saved');
 });
 
-/* ══════════════════════ push notifications ══════════════════════
-   A local setTimeout only fires while the page is alive, which is exactly
-   never at 5:30am. Real delivery needs a push subscription the server can
-   reach with the app closed.
-
-   iOS only allows this for a PWA installed to the Home Screen, so the UI has
-   to say so rather than silently failing.
-   ═══════════════════════════════════════════════════════════════ */
+/* ══════════════════════ push ══════════════════════ */
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
 const isInstalled = () =>
   window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
@@ -764,43 +698,38 @@ const pushSupported = () =>
 function urlBase64ToUint8Array(base64) {
   const padded = (base64 + '='.repeat((4 - base64.length % 4) % 4))
     .replace(/-/g, '+').replace(/_/g, '/');
-  const raw = atob(padded);
-  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+  return Uint8Array.from([...atob(padded)].map((c) => c.charCodeAt(0)));
 }
 
-// Why push is or is not available right now, in words the screen can use.
 function pushState() {
   if (isNative()) {
-    return Notification && Notification.permission === 'denied'
+    return (typeof Notification !== 'undefined' && Notification.permission === 'denied')
       ? { code: 'denied', text: 'Notifications are off. Turn them on in Settings → Hifdh.' }
       : { code: state.pushReady ? 'on' : 'off', text: null };
   }
   if (!pushSupported()) {
-    return { code: 'unsupported',
-      text: 'This browser cannot deliver reminders. On iPhone use Safari.' };
+    return { code: 'unsupported', text: 'This browser cannot deliver reminders. On iPhone use Safari.' };
   }
   if (isIOS() && !isInstalled()) {
     return { code: 'needs-install',
-      text: 'Add Hifdh to your Home Screen first — tap Share, then Add to Home Screen. iOS only delivers notifications to installed apps.' };
+      text: 'Add Hifdh to your Home Screen first — tap Share, then Add to Home Screen. iOS only sends notifications to installed apps.' };
   }
   if (Notification.permission === 'denied') {
-    return { code: 'denied',
-      text: 'Notifications are blocked. Turn them on for Hifdh in iOS Settings → Notifications.' };
+    return { code: 'denied', text: 'Notifications are blocked. Turn them on for Hifdh in iOS Settings → Notifications.' };
   }
-  if (Notification.permission === 'granted' && state.pushReady) {
-    return { code: 'on', text: null };
-  }
-  return { code: 'off', text: null };
+  return { code: (Notification.permission === 'granted' && state.pushReady) ? 'on' : 'off', text: null };
 }
 
+// What each weekday's reminder should say, from settings alone - arithmetic,
+// so it is true without a server and without guessing at the rotation.
 function reminderBodies() {
   const c = state.config;
   const out = [];
   for (let iso = 1; iso <= 7; iso++) {
     const rest = (c.restDays || []).includes(iso);
     const lesson = (c.lessonDays || []).includes(iso);
-    if (rest && !lesson) { out.push(null); continue; }   // truly nothing: stay quiet
-    let pages = rest ? 0 : c.sabqiPagesPerDay + c.manzilPagesPerDay;
+    if (rest && !lesson) { out.push(null); continue; }
+    let pages = rest ? 0 : c.revisionPagesPerDay;
     if (lesson) pages += c.newPagesPerLesson;
     out.push(pages > 0
       ? `${pages} page${pages === 1 ? '' : 's'} to revise` + (lesson ? ', including a new page' : '')
@@ -810,11 +739,8 @@ function reminderBodies() {
 }
 
 async function enablePush() {
-  // Inside the iOS app a WKWebView gets no Web Push, so schedule local
-  // notifications on the device instead - no server, fires offline.
   if (isNative()) {
-    const granted = await nativePermission();
-    if (!granted) { toast('Notifications not allowed', true); return false; }
+    if (!(await nativePermission())) { toast('Notifications not allowed', true); return false; }
     const t = state.settings.reminder_time;
     if (!t) return false;
     await scheduleNativeReminders(t.slice(0, 5), reminderBodies());
@@ -823,13 +749,13 @@ async function enablePush() {
   }
 
   const st = pushState();
-  if (st.code === 'unsupported' || st.code === 'needs-install' || st.code === 'denied') {
+  if (['unsupported', 'needs-install', 'denied'].includes(st.code)) {
     toast(st.code === 'needs-install' ? 'Add to Home Screen first' : 'Notifications unavailable', true);
     return false;
   }
-
-  const permission = await Notification.requestPermission();
-  if (permission !== 'granted') { toast('Notifications not allowed', true); return false; }
+  if (await Notification.requestPermission() !== 'granted') {
+    toast('Notifications not allowed', true); return false;
+  }
 
   const reg = await navigator.serviceWorker.ready;
   let sub = await reg.pushManager.getSubscription();
@@ -839,15 +765,11 @@ async function enablePush() {
       applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
     });
   }
-
   const raw = sub.toJSON();
   const { error } = await sb.from('push_subscriptions').upsert({
-    user_id: state.user.id,
-    endpoint: sub.endpoint,
-    p256dh: raw.keys.p256dh,
-    auth: raw.keys.auth,
-    user_agent: navigator.userAgent.slice(0, 300),
-    failures: 0
+    user_id: state.user.id, endpoint: sub.endpoint,
+    p256dh: raw.keys.p256dh, auth: raw.keys.auth,
+    user_agent: navigator.userAgent.slice(0, 300), failures: 0
   }, { onConflict: 'endpoint' });
   if (error) { console.error(error); toast('Could not register for reminders', true); return false; }
 
@@ -868,8 +790,6 @@ async function disablePush() {
   state.pushReady = false;
 }
 
-// Keep the stored subscription honest: the push service can rotate it, and a
-// reinstall produces a new one.
 async function refreshPushState() {
   state.pushReady = false;
   if (isNative()) {
@@ -886,21 +806,20 @@ async function refreshPushState() {
     if (!sub) return;
     const { data } = await sb.from('push_subscriptions').select('id').eq('endpoint', sub.endpoint);
     if (data && data.length) { state.pushReady = true; return; }
-    await enablePush();          // known permission, unknown endpoint: re-register
+    await enablePush();
   } catch (e) { console.warn('push state check failed', e); }
 }
 
-navigator.serviceWorker && navigator.serviceWorker.addEventListener('message', (e) => {
-  if (e.data && e.data.type === 'resubscribe') enablePush();
-});
+if (navigator.serviceWorker) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'resubscribe') enablePush();
+  });
+}
 
 /* ══════════════════════ More ══════════════════════ */
-// The old local setTimeout is gone: it only fired while the page was alive,
-// which at 5:30am it never is. Delivery is now the service worker's job.
 function renderReminderStatus() {
   const st = pushState();
-  const line = $('remind-status');
-  const btn = $('remind-save');
+  const line = $('remind-status'), btn = $('remind-save');
   const t = state.settings.reminder_time;
 
   if (st.text) {
@@ -911,13 +830,10 @@ function renderReminderStatus() {
   }
   btn.disabled = false;
   if (st.code === 'on' && t) {
-    line.textContent = `Reminders on. Hifdh will notify you at ${t.slice(0,5)} each day, even when closed.`;
+    line.textContent = `On. You'll be nudged at ${t.slice(0,5)} each day, even with the app closed.`;
     btn.textContent = 'Update reminder';
-  } else if (st.code === 'on') {
-    line.textContent = 'Reminders on. Set a time to start receiving them.';
-    btn.textContent = 'Save reminder';
   } else {
-    line.textContent = 'Turn on reminders to get the day\u2019s portion at your chosen time.';
+    line.textContent = 'Get the day’s portion at a time you choose.';
     btn.textContent = 'Turn on reminders';
   }
 }
@@ -925,25 +841,22 @@ function renderReminderStatus() {
 $('remind-save').addEventListener('click', async () => {
   const t = $('set-remind').value;
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-
-  // Save first: whatever happens with the permission prompt, the time sticks.
   state.settings.reminder_time = t || null;
   state.settings.timezone = tz;
   enqueue({ id: 'settings', type: 'upsert', table: 'settings',
             row: { user_id: state.user.id, reminder_time: t || null, timezone: tz,
                    updated_at: new Date().toISOString() }, onConflict: 'user_id' });
-
-  if (t) {
-    const ok = await enablePush();
-    if (ok) toast(`Reminder set for ${t}`);
-  } else {
-    await disablePush();
-    toast('Reminder cleared');
-  }
+  if (t) { if (await enablePush()) toast(`Reminder set for ${t}`); }
+  else { await disablePush(); toast('Reminder cleared'); }
   renderReminderStatus();
 });
 
 async function renderMore() {
+  const anon = state.anonymous;
+  $('account-anon').hidden = !anon;
+  $('account-known').hidden = anon;
+  $('account-hr').hidden = anon;
+  $('account-signout').hidden = anon;
   $('set-email').textContent = state.user.email || '';
   $('set-remind').value = state.settings.reminder_time
     ? state.settings.reminder_time.slice(0, 5) : '';
@@ -951,6 +864,37 @@ async function renderMore() {
   await refreshPushState();
   renderReminderStatus();
 }
+
+// Attaching an email to an anonymous account keeps the data and adds a way
+// back in. The code is typed here, so nothing ever escapes to Safari.
+$('link-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const email = $('link-email').value.trim();
+  const msg = $('link-msg');
+  $('link-btn').disabled = true;
+  const { error } = await sb.auth.updateUser({ email });
+  $('link-btn').disabled = false;
+  msg.hidden = false;
+  if (error) { msg.textContent = error.message; return; }
+  msg.textContent = `We sent a code to ${email}. Enter it below.`;
+  $('link-code-form').hidden = false;
+});
+
+$('link-code-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = $('link-msg');
+  const { error } = await sb.auth.verifyOtp({
+    email: $('link-email').value.trim(),
+    token: $('link-code').value.trim(),
+    type: 'email_change'
+  });
+  if (error) { msg.hidden = false; msg.textContent = error.message; return; }
+  const { data: { user } } = await sb.auth.getUser();
+  state.user = user;
+  state.anonymous = !user.email;
+  toast('Progress saved to your email');
+  renderMore();
+});
 
 $('signout').addEventListener('click', async () => { await sb.auth.signOut(); location.reload(); });
 
@@ -961,7 +905,6 @@ const VIEWS = {
   progress: { label: 'Progress', icon: ICONS.progress, render: renderProgress },
   more:     { label: 'More',     icon: ICONS.more,     render: renderMore }
 };
-
 $('tabs').innerHTML = Object.entries(VIEWS).map(([k, v]) =>
   `<button class="tab" data-view="${k}" type="button">${svg(v.icon)}<span>${v.label}</span></button>`).join('');
 
@@ -977,7 +920,6 @@ $('tabs').addEventListener('click', (e) => {
   if (t) { buzz(4); show(t.dataset.view); }
 });
 
-// Coming back after midnight must re-plan, not show yesterday.
 let lastDay = dateKey();
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState !== 'visible') return;
@@ -989,51 +931,106 @@ document.addEventListener('visibilitychange', async () => {
   } else if (state.view === 'today') renderToday();
 });
 
-/* ══════════════════════ auth ══════════════════════ */
+/* ══════════════════════ auth ══════════════════════
+   Nobody should meet a sign-up wall. A session is created silently on first
+   open; email is optional and only ever entered as a code, because a link
+   tapped in Mail opens in Safari - which on iOS is a different storage box
+   from the installed app, so the session would land somewhere unreachable.
+   ═══════════════════════════════════════════════════ */
+let pendingEmail = '';
+
 $('auth-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = $('auth-btn'), msg = $('auth-msg');
+  pendingEmail = $('email').value.trim();
   btn.disabled = true; btn.textContent = 'Sending…';
   const { error } = await sb.auth.signInWithOtp({
-    email: $('email').value.trim(),
-    options: { emailRedirectTo: window.location.origin + window.location.pathname }
+    email: pendingEmail, options: { shouldCreateUser: true }
   });
-  btn.disabled = false; btn.textContent = 'Continue';
+  btn.disabled = false; btn.textContent = 'Email me a code';
   msg.hidden = false;
   msg.classList.toggle('is-err', !!error);
-  msg.textContent = error ? error.message : 'Check your email and tap the link.';
+  if (error) { msg.textContent = error.message; return; }
+  msg.textContent = `Code sent to ${pendingEmail}.`;
+  $('auth-form').hidden = true;
+  $('code-form').hidden = false;
+  $('code').focus();
 });
 
-/* ══════════════════════ first run ══════════════════════ */
-function renderSetup() {
-  surahOptions($('su-from'), 44);
-  surahOptions($('su-to'), 114);
-  let days = [1, 5];
-  const paintDays = () => dayButtons($('su-days'), days, (d) => {
-    days = days.includes(d) ? days.filter((x) => x !== d) : [...days, d].sort();
-    renderSetup.days = days;
-    paintDays();
+$('code-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = $('auth-msg');
+  const { data, error } = await sb.auth.verifyOtp({
+    email: pendingEmail, token: $('code').value.trim(), type: 'email'
   });
-  paintDays();
-  renderSetup.days = days;
+  msg.hidden = false;
+  if (error) { msg.classList.add('is-err'); msg.textContent = error.message; return; }
+  if (data.session) start(data.session);
+});
+
+$('code-back').addEventListener('click', () => {
+  $('code-form').hidden = true;
+  $('auth-form').hidden = false;
+  $('auth-msg').hidden = true;
+});
+
+$('auth-skip').addEventListener('click', async () => {
+  const { data, error } = await sb.auth.signInAnonymously();
+  if (error) {
+    const msg = $('auth-msg');
+    msg.hidden = false; msg.classList.add('is-err');
+    msg.textContent = 'Anonymous accounts are turned off for this project. Use an email for now.';
+    return;
+  }
+  start(data.session);
+});
+
+/* ══════════════════════ setup ══════════════════════ */
+function renderSetup() {
+  let from = 44, to = 114, pages = 10, learning = true, days = [1, 5];
+
+  surahOptions($('su-from'), from);
+  surahOptions($('su-to'), to);
+
+  const paintDays = () => dayButtons($('su-days'), days, (d) => {
+    days = toggleDay(days, d);
+    paintDays();
+    sync();
+  });
 
   const sync = () => {
-    let a = Number($('su-from').value), b = Number($('su-to').value);
-    if (a > b) [a, b] = [b, a];
-    const r = pagesForSurahRange(a, b);
-    $('setup-summary').textContent =
-      `${r.to - r.from + 1} pages · ${labelForPages(r.from, r.to)}`;
+    from = Number($('su-from').value); to = Number($('su-to').value);
+    if (from > to) [from, to] = [to, from];
+    const r = pagesForSurahRange(from, to);
+    const held = r.to - r.from + 1;
+    $('su-held').textContent = `${held} pages · ${labelForPages(r.from, r.to)}`;
+    $('su-pages').textContent = pages;
+    const cycle = Math.ceil(held / Math.max(1, pages));
+    $('su-cycle').textContent =
+      `You'll go through all of it every ${cycle} day${cycle === 1 ? '' : 's'}.`;
+    $('su-lesson-wrap').hidden = !learning;
   };
-  $('su-from').onchange = sync; $('su-to').onchange = sync;
+
+  $('su-from').onchange = sync;
+  $('su-to').onchange = sync;
+  $('su-stepper').onclick = (e) => {
+    const b = e.target.closest('[data-d]');
+    if (!b) return;
+    pages = clamp(pages + Number(b.dataset.d), 1, 60);
+    buzz(6); sync();
+  };
+  $('su-learning').onchange = (e) => { learning = e.target.checked; sync(); };
+  paintDays();
   sync();
 
   $('setup-go').onclick = async () => {
-    let a = Number($('su-from').value), b = Number($('su-to').value);
-    if (a > b) [a, b] = [b, a];
-    const r = pagesForSurahRange(a, b);
-    state.config = { ...DEFAULT_CONFIG, lessonDays: [...renderSetup.days].sort() };
+    const r = pagesForSurahRange(from, to);
+    state.config = { ...DEFAULT_CONFIG,
+      revisionPagesPerDay: pages,
+      lessonDays: learning ? [...days].sort() : [],
+      newPagesPerLesson: learning ? 1 : 0 };
     state.progress = { memFrom: r.from, memTo: r.to, partialFrom: null, partialTo: null,
-                       sabqiCursor: r.from, manzilCursor: 0, lastPlanned: null };
+                       revisionCursor: r.from, lastPlanned: null };
     await sb.from('plan_config').upsert(cfgToRow(state.config), { onConflict: 'user_id' });
     await sb.from('progress').upsert(progToRow(state.progress), { onConflict: 'user_id' });
     $('setup').hidden = true;
@@ -1046,11 +1043,13 @@ function renderSetup() {
 /* ══════════════════════ boot ══════════════════════ */
 async function start(session) {
   state.user = session.user;
+  state.anonymous = !session.user.email;
   try { await loadAll(); } catch (err) { console.error(err); toast('Could not load', true); }
   $('boot').hidden = true; $('auth').hidden = true;
 
   if (!state.progress) { $('setup').hidden = false; renderSetup(); return; }
   await ensureDayPlanned();
+  $('setup').hidden = true;
   $('app').hidden = false;
   show('today');
   flush();
@@ -1058,8 +1057,14 @@ async function start(session) {
 
 (async function boot() {
   const { data: { session } } = await sb.auth.getSession();
-  if (session) await start(session);
-  else { $('boot').hidden = true; $('auth').hidden = false; }
+  if (session) { await start(session); }
+  else {
+    // No wall: try to start a session silently. Only if anonymous sign-in is
+    // unavailable do we fall back to asking for an email.
+    const { data, error } = await sb.auth.signInAnonymously();
+    if (!error && data.session) await start(data.session);
+    else { $('boot').hidden = true; $('auth').hidden = false; }
+  }
 
   sb.auth.onAuthStateChange((ev, s) => {
     if (ev === 'SIGNED_IN' && s && !state.user) start(s);
