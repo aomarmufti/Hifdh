@@ -1,0 +1,19 @@
+{
+  "appId": "com.aomarmufti.hifdh",
+  "appName": "Hifdh",
+  "webDir": "public",
+  "ios": {
+    "contentInset": "always",
+    "backgroundColor": "#F3EEE3",
+    "limitsNavigationsToAppBoundDomains": true
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon",
+      "iconColor": "#1B3A63"
+    }
+  },
+  "server": {
+    "iosScheme": "hifdh"
+  }
+}

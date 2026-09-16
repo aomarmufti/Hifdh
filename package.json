@@ -7,9 +7,19 @@
   "scripts": {
     "test": "node test/engine.test.js && node test/run.cjs",
     "test:engine": "node test/engine.test.js",
-    "test:e2e": "node test/run.cjs"
+    "test:e2e": "node test/run.cjs",
+    "ios:sync": "cap sync ios",
+    "ios:open": "cap open ios"
   },
   "devDependencies": {
+    "@capacitor/cli": "^6.2.2",
     "playwright": "^1.49.1"
+  },
+  "dependencies": {
+    "@capacitor/app": "^6.0.3",
+    "@capacitor/core": "^6.2.2",
+    "@capacitor/haptics": "^6.0.3",
+    "@capacitor/ios": "^6.2.2",
+    "@capacitor/local-notifications": "^6.1.3"
   }
 }

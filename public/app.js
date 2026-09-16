@@ -2,6 +2,9 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 import { SUPABASE_URL, SUPABASE_KEY, VAPID_PUBLIC_KEY } from './config.js';
 import { SURAHS, surahsInPages, pagesForSurahRange, labelForPages } from './lib/quran.js';
 import {
+  isNative, nativePermission, scheduleNativeReminders, cancelNativeReminders, tapFeedback
+} from './lib/native.js';
+import {
   DEFAULT_CONFIG, planDay, absorbSabaq, undoSabaq, cycleLengthDays, preview,
   memorizedPages, totalPages, describeRuns, activeSurah, nextNewPages
 } from './lib/engine.js';
@@ -46,7 +49,10 @@ function toast(msg, err = false) {
   clearTimeout(toastT);
   toastT = setTimeout(() => { el.hidden = true; }, 2400);
 }
-const buzz = (ms) => { if (navigator.vibrate) navigator.vibrate(ms); };
+const buzz = (ms) => {
+  if (isNative()) { tapFeedback(ms >= 12 ? 'heavy' : 'light'); return; }
+  if (navigator.vibrate) navigator.vibrate(ms);
+};
 
 /* ══════════════════════ state ══════════════════════ */
 const state = {
@@ -531,6 +537,11 @@ async function commitPlan() {
   commitT = setTimeout(async () => {
     await regenerateToday();
     if (state.view === 'today') renderToday();
+    // Changing pages-per-day changes what the reminder should say.
+    if (isNative() && state.pushReady && state.settings.reminder_time) {
+      try { await scheduleNativeReminders(state.settings.reminder_time.slice(0,5), reminderBodies()); }
+      catch (e) { console.warn('reschedule failed', e); }
+    }
   }, 400);
 }
 
@@ -759,6 +770,11 @@ function urlBase64ToUint8Array(base64) {
 
 // Why push is or is not available right now, in words the screen can use.
 function pushState() {
+  if (isNative()) {
+    return Notification && Notification.permission === 'denied'
+      ? { code: 'denied', text: 'Notifications are off. Turn them on in Settings → Hifdh.' }
+      : { code: state.pushReady ? 'on' : 'off', text: null };
+  }
   if (!pushSupported()) {
     return { code: 'unsupported',
       text: 'This browser cannot deliver reminders. On iPhone use Safari.' };
@@ -777,7 +793,35 @@ function pushState() {
   return { code: 'off', text: null };
 }
 
+function reminderBodies() {
+  const c = state.config;
+  const out = [];
+  for (let iso = 1; iso <= 7; iso++) {
+    const rest = (c.restDays || []).includes(iso);
+    const lesson = (c.lessonDays || []).includes(iso);
+    if (rest && !lesson) { out.push(null); continue; }   // truly nothing: stay quiet
+    let pages = rest ? 0 : c.sabqiPagesPerDay + c.manzilPagesPerDay;
+    if (lesson) pages += c.newPagesPerLesson;
+    out.push(pages > 0
+      ? `${pages} page${pages === 1 ? '' : 's'} to revise` + (lesson ? ', including a new page' : '')
+      : null);
+  }
+  return out;
+}
+
 async function enablePush() {
+  // Inside the iOS app a WKWebView gets no Web Push, so schedule local
+  // notifications on the device instead - no server, fires offline.
+  if (isNative()) {
+    const granted = await nativePermission();
+    if (!granted) { toast('Notifications not allowed', true); return false; }
+    const t = state.settings.reminder_time;
+    if (!t) return false;
+    await scheduleNativeReminders(t.slice(0, 5), reminderBodies());
+    state.pushReady = true;
+    return true;
+  }
+
   const st = pushState();
   if (st.code === 'unsupported' || st.code === 'needs-install' || st.code === 'denied') {
     toast(st.code === 'needs-install' ? 'Add to Home Screen first' : 'Notifications unavailable', true);
@@ -812,6 +856,7 @@ async function enablePush() {
 }
 
 async function disablePush() {
+  if (isNative()) { await cancelNativeReminders(); state.pushReady = false; return; }
   try {
     const reg = await navigator.serviceWorker.ready;
     const sub = await reg.pushManager.getSubscription();
@@ -827,6 +872,13 @@ async function disablePush() {
 // reinstall produces a new one.
 async function refreshPushState() {
   state.pushReady = false;
+  if (isNative()) {
+    try {
+      const { pendingNativeReminders } = await import('./lib/native.js');
+      state.pushReady = (await pendingNativeReminders()).length > 0;
+    } catch { /* plugin unavailable */ }
+    return;
+  }
   if (!pushSupported() || Notification.permission !== 'granted') return;
   try {
     const reg = await navigator.serviceWorker.ready;

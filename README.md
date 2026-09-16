@@ -152,12 +152,31 @@ holds one thing: an offline outbox that replays a tick made with no signal.
 | `inspirations` | the shared daily messages (read-only) |
 | `settings` | reminder time |
 
-## Reminders — what actually works
+## Reminders
 
-A local notification while the app is open or warm in the background. A true
-scheduled push to a closed app needs a push server with VAPID keys, which this
-does not have. The time is saved **before** the permission prompt appears, so
-dismissing that prompt never loses the setting.
+The reminder fires with the app fully closed. Two delivery paths, each the right
+one for its platform, from one setting:
+
+**Web (PWA).** A Web Push subscription. `sw.js` receives the push and shows the
+notification; a `send-reminders` Edge Function is swept by `pg_cron` every five
+minutes and works out local time in each user's own timezone. The VAPID private
+key and cron secret live in a table with no RLS policy, readable only by the
+service role, and are never committed. iOS delivers Web Push only to a PWA
+installed to the Home Screen, so the screen says so rather than failing quietly.
+
+**Native (iOS app).** A `WKWebView` gets no Web Push, so the native build
+schedules seven weekly-repeating local notifications instead — one per weekday,
+each with that day's correct body, rest days not scheduled at all. No server, no
+network, fires offline. See `ios/README.md`.
+
+The notification names the real portions when the day is already planned, and
+otherwise states the size arithmetically from the settings. The scheduling
+engine is deliberately not duplicated server-side: a second copy would drift and
+eventually put a *wrong* portion on a lock screen, which is worse than a vague
+one. It stays silent when the day is already finished.
+
+The time is saved **before** the permission prompt appears, so dismissing that
+prompt never loses the setting.
 
 ## Page numbers
 
@@ -181,7 +200,7 @@ over, that un-ticking the page which closed a gap re-opens it, that Arabic
 follows its own days without touching the rotation cursors, and that planning
 never mutates its input.
 
-**End-to-end (102 assertions, `test/test.cjs`)** — headless Chromium at iPhone
+**End-to-end (108 assertions, `test/test.cjs`)** — headless Chromium at iPhone
 viewport driving the real UI. The database lives in the Node test process, not
 the browser, so the persistence test clears **all** cookies and browser storage,
 reloads, and asserts everything returns — the actual cross-device guarantee.
@@ -193,8 +212,9 @@ day left half-done still reads as half-done in the heatmap), every planner dial 
 portion, the preview starting at tomorrow and continuing from where today
 stops, the surah pickers agreeing with the stored range, new pages entering
 Az-Zukhruf at p.489 rather than p.495 and the held count moving with them, the heatmap and
-retention chart, reminder persistence with the permission prompt denied, dark
-mode, no horizontal overflow at 390px, tap targets, and zero console errors.
+retention chart, reminder persistence with the permission prompt denied, the timezone being
+captured, an uninstalled iPhone being told to Add to Home Screen rather than
+shown a button that cannot work, dark mode, no horizontal overflow at 390px, tap targets, and zero console errors.
 
 Row-level security and the seed trigger were verified separately against the
 live database.
@@ -213,5 +233,11 @@ supabase/migrations/  schema as applied
 test/                 engine suite + end-to-end harness
 ```
 
-No bundler, no build step, no runtime dependencies. `.github/workflows/ci.yml`
-runs both suites on every push to `main` and every pull request.
+No bundler, no build step, no runtime dependencies in the web app.
+`.github/workflows/ci.yml` runs both suites on every push to `main` and every
+pull request.
+
+`ios/` holds a Capacitor shell around the same `public/` directory — copied
+verbatim, so the two builds cannot diverge. `ios/README.md` covers building,
+TestFlight and submission, including an honest read on the Guideline 4.2
+rejection risk.

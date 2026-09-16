@@ -1,16 +1,29 @@
 {
   "name": "Hifdh Tracker",
   "short_name": "Hifdh",
-  "description": "Daily Quran revision and Arabic study tracker",
+  "description": "Your daily Qur'an revision, worked out for you",
   "start_url": ".",
   "scope": ".",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#0f1512",
-  "theme_color": "#0f1512",
+  "background_color": "#F3EEE3",
+  "theme_color": "#F3EEE3",
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
-    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }
