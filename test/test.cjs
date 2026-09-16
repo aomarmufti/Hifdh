@@ -411,6 +411,39 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
   ok('reminder saved even though the permission prompt is denied',
      db.settings[0] && db.settings[0].reminder_time === '05:30', JSON.stringify(db.settings));
 
+  /* ─────────── 10b. push notification states ─────────── */
+  console.log('\n[10b] Push reminders');
+  const status = await page.textContent('#remind-status');
+  ok('the reminder screen explains what it will do',
+     /remind/i.test(status), status);
+  ok('the save button is usable on a supporting browser',
+     !(await page.locator('#remind-save').isDisabled()));
+  db = await api('dump');
+  ok('the timezone is captured alongside the time',
+     db.settings[0] && typeof db.settings[0].timezone === 'string' &&
+     db.settings[0].timezone.length > 1, JSON.stringify(db.settings[0]));
+  ok('a denied permission prompt still leaves the time saved',
+     db.settings[0].reminder_time === '05:30', String(db.settings[0].reminder_time));
+
+  // iOS refuses push to a browser tab; only an installed Home Screen app gets
+  // it. The screen has to say so rather than appearing to work.
+  const iphone = await browser.newContext({
+    viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
+  });
+  const ip = await iphone.newPage();
+  await api('authed');
+  await ip.goto(BASE);
+  await ip.waitForSelector('#app:not([hidden])', { timeout: 5000 });
+  await ip.click('[data-view="more"]');
+  await ip.waitForTimeout(400);
+  const iosMsg = await ip.textContent('#remind-status');
+  ok('on an uninstalled iPhone it asks you to Add to Home Screen',
+     /home screen/i.test(iosMsg), iosMsg);
+  ok('and it does not pretend the button will work',
+     await ip.locator('#remind-save').isDisabled());
+  await iphone.close();
+
   /* ─────────── 11. presentation ─────────── */
   console.log('\n[11] Layout');
   await page.click('[data-view="today"]');

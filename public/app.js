@@ -1,5 +1,5 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.58.0/+esm';
-import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
+import { SUPABASE_URL, SUPABASE_KEY, VAPID_PUBLIC_KEY } from './config.js';
 import { SURAHS, surahsInPages, pagesForSurahRange, labelForPages } from './lib/quran.js';
 import {
   DEFAULT_CONFIG, planDay, absorbSabaq, undoSabaq, cycleLengthDays, preview,
@@ -58,6 +58,7 @@ const state = {
   reviews: [],
   settings: {},
   inspirations: [],
+  pushReady: false,
   view: 'today'
 };
 
@@ -735,44 +736,168 @@ $('review-form').addEventListener('submit', (e) => {
   toast('Review saved');
 });
 
-/* ══════════════════════ More ══════════════════════ */
-let remindT;
-function scheduleReminder() {
-  clearTimeout(remindT);
-  const t = state.settings.reminder_time;
-  const st = $('remind-status');
-  if (!t) { st.textContent = 'No reminder set.'; return; }
-  if (!('Notification' in window) || Notification.permission !== 'granted') {
-    st.textContent = 'Saved. Allow notifications to receive it.'; return;
-  }
-  const [h, m] = t.split(':').map(Number);
-  const next = new Date(); next.setHours(h, m, 0, 0);
-  if (next <= new Date()) next.setDate(next.getDate() + 1);
-  st.textContent = `Next ${next.toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'})}. Fires while the app is open in the background.`;
-  remindT = setTimeout(() => {
-    try { new Notification('Hifdh', { body: "Today's portion is waiting.", tag: 'hifdh' }); } catch {}
-    scheduleReminder();
-  }, next - new Date());
+/* ══════════════════════ push notifications ══════════════════════
+   A local setTimeout only fires while the page is alive, which is exactly
+   never at 5:30am. Real delivery needs a push subscription the server can
+   reach with the app closed.
+
+   iOS only allows this for a PWA installed to the Home Screen, so the UI has
+   to say so rather than silently failing.
+   ═══════════════════════════════════════════════════════════════ */
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+const isInstalled = () =>
+  window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const pushSupported = () =>
+  'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+function urlBase64ToUint8Array(base64) {
+  const padded = (base64 + '='.repeat((4 - base64.length % 4) % 4))
+    .replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(padded);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
 }
 
-$('remind-save').addEventListener('click', () => {
-  const t = $('set-remind').value;
-  // Save first: a dismissed permission prompt must not lose the setting.
-  state.settings.reminder_time = t || null;
-  enqueue({ id: 'settings', type: 'upsert', table: 'settings',
-            row: { user_id: state.user.id, reminder_time: t || null,
-                   updated_at: new Date().toISOString() }, onConflict: 'user_id' });
-  scheduleReminder();
-  toast('Reminder saved');
-  if (t && 'Notification' in window && Notification.permission === 'default') {
-    try { Promise.resolve(Notification.requestPermission()).then(scheduleReminder).catch(()=>{}); } catch {}
+// Why push is or is not available right now, in words the screen can use.
+function pushState() {
+  if (!pushSupported()) {
+    return { code: 'unsupported',
+      text: 'This browser cannot deliver reminders. On iPhone use Safari.' };
   }
+  if (isIOS() && !isInstalled()) {
+    return { code: 'needs-install',
+      text: 'Add Hifdh to your Home Screen first — tap Share, then Add to Home Screen. iOS only delivers notifications to installed apps.' };
+  }
+  if (Notification.permission === 'denied') {
+    return { code: 'denied',
+      text: 'Notifications are blocked. Turn them on for Hifdh in iOS Settings → Notifications.' };
+  }
+  if (Notification.permission === 'granted' && state.pushReady) {
+    return { code: 'on', text: null };
+  }
+  return { code: 'off', text: null };
+}
+
+async function enablePush() {
+  const st = pushState();
+  if (st.code === 'unsupported' || st.code === 'needs-install' || st.code === 'denied') {
+    toast(st.code === 'needs-install' ? 'Add to Home Screen first' : 'Notifications unavailable', true);
+    return false;
+  }
+
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') { toast('Notifications not allowed', true); return false; }
+
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+    });
+  }
+
+  const raw = sub.toJSON();
+  const { error } = await sb.from('push_subscriptions').upsert({
+    user_id: state.user.id,
+    endpoint: sub.endpoint,
+    p256dh: raw.keys.p256dh,
+    auth: raw.keys.auth,
+    user_agent: navigator.userAgent.slice(0, 300),
+    failures: 0
+  }, { onConflict: 'endpoint' });
+  if (error) { console.error(error); toast('Could not register for reminders', true); return false; }
+
+  state.pushReady = true;
+  return true;
+}
+
+async function disablePush() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+      await sub.unsubscribe();
+    }
+  } catch (e) { console.warn('unsubscribe failed', e); }
+  state.pushReady = false;
+}
+
+// Keep the stored subscription honest: the push service can rotate it, and a
+// reinstall produces a new one.
+async function refreshPushState() {
+  state.pushReady = false;
+  if (!pushSupported() || Notification.permission !== 'granted') return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (!sub) return;
+    const { data } = await sb.from('push_subscriptions').select('id').eq('endpoint', sub.endpoint);
+    if (data && data.length) { state.pushReady = true; return; }
+    await enablePush();          // known permission, unknown endpoint: re-register
+  } catch (e) { console.warn('push state check failed', e); }
+}
+
+navigator.serviceWorker && navigator.serviceWorker.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'resubscribe') enablePush();
 });
 
-function renderMore() {
+/* ══════════════════════ More ══════════════════════ */
+// The old local setTimeout is gone: it only fired while the page was alive,
+// which at 5:30am it never is. Delivery is now the service worker's job.
+function renderReminderStatus() {
+  const st = pushState();
+  const line = $('remind-status');
+  const btn = $('remind-save');
+  const t = state.settings.reminder_time;
+
+  if (st.text) {
+    line.textContent = st.text;
+    btn.textContent = st.code === 'needs-install' ? 'Add to Home Screen to enable' : 'Reminders unavailable';
+    btn.disabled = true;
+    return;
+  }
+  btn.disabled = false;
+  if (st.code === 'on' && t) {
+    line.textContent = `Reminders on. Hifdh will notify you at ${t.slice(0,5)} each day, even when closed.`;
+    btn.textContent = 'Update reminder';
+  } else if (st.code === 'on') {
+    line.textContent = 'Reminders on. Set a time to start receiving them.';
+    btn.textContent = 'Save reminder';
+  } else {
+    line.textContent = 'Turn on reminders to get the day\u2019s portion at your chosen time.';
+    btn.textContent = 'Turn on reminders';
+  }
+}
+
+$('remind-save').addEventListener('click', async () => {
+  const t = $('set-remind').value;
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
+  // Save first: whatever happens with the permission prompt, the time sticks.
+  state.settings.reminder_time = t || null;
+  state.settings.timezone = tz;
+  enqueue({ id: 'settings', type: 'upsert', table: 'settings',
+            row: { user_id: state.user.id, reminder_time: t || null, timezone: tz,
+                   updated_at: new Date().toISOString() }, onConflict: 'user_id' });
+
+  if (t) {
+    const ok = await enablePush();
+    if (ok) toast(`Reminder set for ${t}`);
+  } else {
+    await disablePush();
+    toast('Reminder cleared');
+  }
+  renderReminderStatus();
+});
+
+async function renderMore() {
   $('set-email').textContent = state.user.email || '';
-  $('set-remind').value = state.settings.reminder_time ? state.settings.reminder_time.slice(0,5) : '';
-  scheduleReminder();
+  $('set-remind').value = state.settings.reminder_time
+    ? state.settings.reminder_time.slice(0, 5) : '';
+  renderReminderStatus();
+  await refreshPushState();
+  renderReminderStatus();
 }
 
 $('signout').addEventListener('click', async () => { await sb.auth.signOut(); location.reload(); });
