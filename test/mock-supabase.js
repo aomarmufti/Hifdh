@@ -25,9 +25,15 @@ class Query {
   }
   then(res, rej) { return this._run().then(res, rej); }
 
-  async upsert(row, opts) {
-    const r = await rpc('upsert', { table: this.table, row, onConflict: opts && opts.onConflict });
-    return { data: r.rows || null, error: r.error || null };
+  upsert(row, opts) {
+    // Chainable so `.upsert(...).select().maybeSingle()` works like the real
+    // client, which reflections rely on to get their generated id back.
+    this._mutation = async () => {
+      const r = await rpc('upsert', { table: this.table, row, onConflict: opts && opts.onConflict });
+      const rows = r.rows || [];
+      return { data: this._single ? (rows[0] || null) : rows, error: r.error || null };
+    };
+    return this;
   }
   insert(rows) {
     this._mutation = async () => {

@@ -1,12 +1,13 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.58.0/+esm';
 import { SUPABASE_URL, SUPABASE_KEY, VAPID_PUBLIC_KEY } from './config.js';
-import { SURAHS, surahsInPages, pagesForSurahRange, labelForPages } from './lib/quran.js';
+import { SURAHS, surahsInPages, pagesForSurahRange, labelForPages,
+         ayahCount, formatRef } from './lib/quran.js';
 import {
   isNative, nativePermission, scheduleNativeReminders, cancelNativeReminders, tapFeedback
 } from './lib/native.js';
 import {
   DEFAULT_CONFIG, planDay, absorbNew, undoNew, cycleLengthDays, cyclePosition,
-  preview, totalPages, describeRuns, activeSurah, nextNewPages
+  preview, totalPages, describeRuns, activeSurah, nextNewPages, readingFinish
 } from './lib/engine.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
@@ -35,9 +36,12 @@ const camel = (k) => k.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 const KINDS = {
   new:      { label: 'New page', arabic: 'Sabaq',      cls: 'k-new' },
   revision: { label: 'Revision', arabic: 'Murājaʿah', cls: 'k-revision' },
+  reading:  { label: 'Reading',  arabic: 'Til\u0101wah',  cls: 'k-reading' },
   arabic:   { label: 'Arabic',   arabic: '',            cls: 'k-arabic' }
 };
-const ORDER = { new: 0, revision: 1, arabic: 2 };
+const ORDER = { new: 0, revision: 1, reading: 2, arabic: 3 };
+// A kind we do not recognise must never blank a whole screen.
+const kindOf = (k) => KINDS[k] || { label: k, arabic: '', cls: '' };
 
 const ICONS = {
   today:    'M3 9h18M7 3v3m10-3v3M5 21h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z',
@@ -75,6 +79,9 @@ const state = {
   history: {},
   reviews: [],
   settings: {},
+  reading: null,            // the reading plan, with its own cursor
+  reflections: [],
+  calMonth: null,           // which month the calendar is showing
   inspirations: [],
   pushReady: false,
   view: 'today'
@@ -142,6 +149,21 @@ const progToRow = (p) => ({
   last_planned_date: p.lastPlanned,
   updated_at: new Date().toISOString()
 });
+const readFromRow = (r) => r ? ({
+  enabled: r.enabled, fromSurah: r.from_surah, toSurah: r.to_surah,
+  pagesPerDay: r.pages_per_day, days: r.days || [1,2,3,4,5,6,7],
+  cursor: r.cursor, startedOn: r.started_on
+}) : null;
+const readToRow = (r) => ({
+  user_id: state.user.id, enabled: r.enabled,
+  from_surah: r.fromSurah, to_surah: r.toSurah,
+  pages_per_day: r.pagesPerDay, days: r.days, cursor: r.cursor,
+  started_on: r.startedOn, updated_at: new Date().toISOString()
+});
+const saveReading = () => state.reading && enqueue({
+  id: 'reading', type: 'upsert', table: 'reading_plan',
+  row: readToRow(state.reading), onConflict: 'user_id' });
+
 const saveConfig = () => enqueue({ id: 'config', type: 'upsert', table: 'plan_config',
                                    row: cfgToRow(state.config), onConflict: 'user_id' });
 const saveProgress = () => enqueue({ id: 'progress', type: 'upsert', table: 'progress',
@@ -150,13 +172,15 @@ const saveProgress = () => enqueue({ id: 'progress', type: 'upsert', table: 'pro
 /* ══════════════════════ load ══════════════════════ */
 async function loadAll() {
   const since = dateKey(addDays(new Date(), -70));
-  const [cfg, prog, tasks, reviews, settings, insp] = await Promise.all([
+  const [cfg, prog, tasks, reviews, settings, insp, reading, refl] = await Promise.all([
     sb.from('plan_config').select('*').maybeSingle(),
     sb.from('progress').select('*').maybeSingle(),
     sb.from('daily_tasks').select('*').gte('task_date', since).order('task_date'),
     sb.from('weekly_review').select('*').order('review_date', { ascending: false }),
     sb.from('settings').select('*').maybeSingle(),
-    sb.from('inspirations').select('*').order('id')
+    sb.from('inspirations').select('*').order('id'),
+    sb.from('reading_plan').select('*').maybeSingle(),
+    sb.from('reflections').select('*').order('on_date', { ascending: false })
   ]);
 
   state.config = cfg.data ? cfgFromRow(cfg.data) : { ...DEFAULT_CONFIG };
@@ -170,6 +194,8 @@ async function loadAll() {
   state.reviews = reviews.data || [];
   state.settings = settings.data || {};
   state.inspirations = insp.data || [];
+  state.reading = readFromRow(reading.data);
+  state.reflections = refl.data || [];
 
   const all = tasks.data || [];
   state.tasks = all.filter((t) => t.task_date === dateKey() && !t.carried_away);
@@ -200,7 +226,7 @@ async function ensureDayPlanned() {
   }
 
   if (state.progress.lastPlanned !== today) {
-    const { tasks, next } = planDay(state.progress, state.config, isoDay());
+    const { tasks, next } = planDay(state.progress, state.config, isoDay(), activeReading());
     if (tasks.length) {
       const { error } = await sb.from('daily_tasks').insert(tasks.map((t) => ({
         user_id: state.user.id, task_date: today, kind: t.kind,
@@ -210,9 +236,18 @@ async function ensureDayPlanned() {
     }
     state.progress = { ...next, lastPlanned: today };
     saveProgress();
+    if (state.reading && next.readingCursor != null) {
+      state.reading = { ...state.reading, cursor: next.readingCursor };
+      saveReading();
+    }
   }
   await refreshToday();
 }
+
+// The plan only counts when switched on and given a pace.
+const activeReading = () =>
+  (state.reading && state.reading.enabled && state.reading.pagesPerDay > 0)
+    ? state.reading : null;
 
 async function refreshToday() {
   const today = dateKey();
@@ -238,9 +273,10 @@ async function regenerateToday() {
   for (const t of undone) {
     const first = (t.pages && t.pages.length) ? t.pages[0] : t.page_from;
     if (t.kind === 'revision') rewound.revisionCursor = first;
+    if (t.kind === 'reading' && state.reading) state.reading.cursor = first;
   }
 
-  const { tasks, next } = planDay(rewound, state.config, isoDay());
+  const { tasks, next } = planDay(rewound, state.config, isoDay(), activeReading());
   // Anything already finished today stays finished; a kind that has appeared
   // because the plan changed (adding a lesson day, say) still gets scheduled.
   const fresh = tasks.filter((t) => !doneKinds.has(t.kind));
@@ -262,6 +298,10 @@ async function regenerateToday() {
     ? { ...next, lastPlanned: today }
     : { ...state.progress, lastPlanned: today };
   saveProgress();
+  if (state.reading && fresh.some((t) => t.kind === 'reading') && next.readingCursor != null) {
+    state.reading = { ...state.reading, cursor: next.readingCursor };
+    saveReading();
+  }
   await refreshToday();
 }
 
@@ -293,7 +333,7 @@ function renderToday() {
 
   const sorted = [...state.tasks].sort((a,b) => ORDER[a.kind] - ORDER[b.kind]);
   $('tasks').innerHTML = sorted.map((t) => {
-    const k = KINDS[t.kind] || { label: t.kind, arabic: '', cls: '' };
+    const k = kindOf(t.kind);
 
     let pageList = (t.pages && t.pages.length) ? t.pages : [];
     if (!pageList.length && t.kind !== 'arabic' && t.page_to >= t.page_from) {
@@ -349,6 +389,8 @@ function renderToday() {
     $('cycle-text').textContent =
       `${pos.done} of ${pos.total} pages this round · everything every ${cyc.revisionDays} days`;
   } else { $('cycle-line').hidden = true; }
+
+  renderReflectCard();
 }
 
 $('tasks').addEventListener('click', async (e) => {
@@ -378,6 +420,111 @@ $('tasks').addEventListener('click', async (e) => {
   enqueue({ id: `task:${t.id}`, type: 'update', table: 'daily_tasks',
             rowId: t.id, row: { done: t.done, done_at: t.done_at } });
   if (t.kind === 'new' && t.done) toast('Added to your revision');
+});
+
+/* ══════════════════════ Reflection ══════════════════════
+   Not a chore to tick off. A verse you sat with, and what you saw in it,
+   kept against the day so the calendar can show it back to you.
+   ═══════════════════════════════════════════════════════ */
+let editingReflection = null;
+
+const reflectionsOn = (k) => state.reflections.filter((r) => r.on_date === k);
+const refLabel = (r) => formatRef(r.surah, r.ayah_from, r.ayah_to);
+
+function renderReflectCard() {
+  const todays = reflectionsOn(dateKey());
+  const body = $('reflect-body');
+  if (todays.length) {
+    const r = todays[0];
+    body.innerHTML = `<span class="reflect-ref">${esc(refLabel(r))}</span>` +
+      (r.note ? `<span class="reflect-note">${esc(r.note)}</span>` : '');
+    $('reflect-card').classList.add('has-note');
+  } else {
+    body.textContent = 'A verse you sat with today';
+    $('reflect-card').classList.remove('has-note');
+  }
+}
+
+function openReflection(existing) {
+  editingReflection = existing || null;
+  const sel = $('rf-surah');
+  sel.innerHTML = SURAHS.map((x) =>
+    `<option value="${x.n}">${x.n}. ${esc(x.name)}</option>`).join('');
+  sel.value = String(existing ? existing.surah : 1);
+  $('rf-from').value = existing && existing.ayah_from ? existing.ayah_from : '';
+  $('rf-to').value = existing && existing.ayah_to ? existing.ayah_to : '';
+  $('rf-note').value = existing ? existing.note : '';
+  $('rf-delete').hidden = !existing;
+  syncRefPreview();
+  $('reflect-sheet').hidden = false;
+}
+
+// Keep the reference honest: you cannot reflect on Al-Kawthar 9.
+function syncRefPreview() {
+  const n = Number($('rf-surah').value);
+  const max = ayahCount(n);
+  $('rf-from').max = max; $('rf-to').max = max;
+  let from = Number($('rf-from').value) || null;
+  let to = Number($('rf-to').value) || null;
+  if (from && from > max) { from = max; $('rf-from').value = max; }
+  if (to && to > max) { to = max; $('rf-to').value = max; }
+  if (from && to && to < from) { to = from; $('rf-to').value = from; }
+  $('rf-ref').textContent = `${formatRef(n, from, to)} · ${max} ayat in this surah`;
+}
+for (const id of ['rf-surah','rf-from','rf-to']) $(id).addEventListener('input', syncRefPreview);
+
+$('reflect-card').addEventListener('click', () => {
+  const todays = reflectionsOn(dateKey());
+  openReflection(todays[0] || null);
+});
+$('rf-cancel').addEventListener('click', () => { $('reflect-sheet').hidden = true; });
+$('reflect-sheet').addEventListener('click', (e) => {
+  if (e.target.id === 'reflect-sheet') $('reflect-sheet').hidden = true;
+});
+
+$('rf-save').addEventListener('click', async () => {
+  const surah = Number($('rf-surah').value);
+  const note = $('rf-note').value.trim();
+  const from = Number($('rf-from').value) || null;
+  const to = Number($('rf-to').value) || null;
+  if (!note && !from) { toast('Add a verse or a note', true); return; }
+
+  const row = {
+    user_id: state.user.id, on_date: dateKey(), surah,
+    ayah_from: from, ayah_to: to, note, updated_at: new Date().toISOString()
+  };
+  if (editingReflection) {
+    row.id = editingReflection.id;
+    Object.assign(editingReflection, row);
+  } else {
+    // Optimistic id so the card updates before the round trip.
+    const temp = { ...row, id: 'temp-' + Date.now() };
+    state.reflections.unshift(temp);
+    editingReflection = temp;
+  }
+  $('reflect-sheet').hidden = true;
+  renderReflectCard();
+
+  const { data, error } = await sb.from('reflections')
+    .upsert(editingReflection.id.startsWith('temp-') ? row : { ...row, id: row.id })
+    .select().maybeSingle();
+  if (error) { console.error(error); toast('Could not save reflection', true); return; }
+  if (data) {
+    const i = state.reflections.findIndex((r) => r.id === editingReflection.id);
+    if (i >= 0) state.reflections[i] = data;
+    renderReflectCard();
+  }
+  toast('Reflection saved');
+});
+
+$('rf-delete').addEventListener('click', async () => {
+  if (!editingReflection) return;
+  const id = editingReflection.id;
+  state.reflections = state.reflections.filter((r) => r.id !== id);
+  $('reflect-sheet').hidden = true;
+  renderReflectCard();
+  if (!String(id).startsWith('temp-')) await sb.from('reflections').delete().eq('id', id);
+  toast('Reflection removed');
 });
 
 /* ══════════════════════ shared controls ══════════════════════ */
@@ -433,6 +580,8 @@ function renderPlan() {
   dayButtons($('p-rest'), c.restDays, (d) => { c.restDays = toggleDay(c.restDays, d); commitPlan(); });
   dayButtons($('p-arabic-days'), c.arabicDays, (d) => { c.arabicDays = toggleDay(c.arabicDays, d); commitPlan(); });
 
+  renderReadingControls();
+
   const cyc = cycleLengthDays(p, c);
   const held = totalPages(p);
   const next = nextNewPages(p, c);
@@ -451,7 +600,8 @@ function renderPlan() {
 
 function renderPreview() {
   const tomorrow = isoDay() === 7 ? 1 : isoDay() + 1;
-  $('preview').innerHTML = preview(state.progress, state.config, tomorrow, 7).map((d, i) => {
+  $('preview').innerHTML = preview(state.progress, state.config, tomorrow, 7, activeReading())
+    .map((d, i) => {
     const name = i === 0 ? 'Tomorrow' : DAYS_LONG[d.isoWeekday - 1];
     const lesson = d.tasks.some((t) => t.kind === 'new');
     if (!d.tasks.length) {
@@ -460,13 +610,68 @@ function renderPreview() {
     const lines = d.tasks.map((t) => {
       const range = t.kind === 'arabic' ? ''
         : ` · ${t.from === t.to ? `p.${t.from}` : `p.${t.from}–${t.to}`}`;
-      return `<div class="pv-line"><span class="pv-k">${KINDS[t.kind].label}</span>
+      return `<div class="pv-line"><span class="pv-k">${kindOf(t.kind).label}</span>
                 <span><span class="pv-t">${esc(t.label)}</span>
                 <span class="pv-p">${range}</span></span></div>`;
     }).join('');
     return `<div class="pv"><div class="pv-day ${lesson?'is-lesson':''}">${name}${lesson?' · Lesson':''}</div>${lines}</div>`;
   }).join('');
 }
+
+const DEFAULT_READING = {
+  enabled: false, fromSurah: 1, toSurah: 114, pagesPerDay: 4,
+  days: [1,2,3,4,5,6,7], cursor: 1, startedOn: null
+};
+
+function renderReadingControls() {
+  const r = state.reading || DEFAULT_READING;
+  $('p-reading-on').checked = r.enabled;
+  $('p-reading-wrap').hidden = !r.enabled;
+  surahOptions($('rp-from'), r.fromSurah);
+  surahOptions($('rp-to'), r.toSurah);
+  $('rp-pages').textContent = r.pagesPerDay;
+  dayButtons($('rp-days'), r.days, (d) => {
+    state.reading = { ...r, days: toggleDay(r.days, d) };
+    saveReading(); commitPlan();
+  });
+
+  // The question anyone setting a reading goal actually has: when do I finish?
+  const fin = r.enabled ? readingFinish(r) : null;
+  $('rp-finish').textContent = fin
+    ? `${fin.remaining} of ${fin.total} pages left · finishes ${fin.date.toLocaleDateString(undefined,
+        { day: 'numeric', month: 'long' })}`
+    : '';
+}
+
+function updateReading(patch) {
+  const base = state.reading || DEFAULT_READING;
+  const next = { ...base, ...patch };
+  // Changing the range moves the cursor inside it, or the plan stalls silently.
+  const { from, to } = pagesForSurahRange(next.fromSurah, next.toSurah);
+  if (next.cursor < from || next.cursor > to) next.cursor = from;
+  if (next.enabled && !next.startedOn) next.startedOn = dateKey();
+  state.reading = next;
+  saveReading();
+  commitPlan();
+}
+
+$('p-reading-on').addEventListener('change', (e) => updateReading({ enabled: e.target.checked }));
+for (const id of ['rp-from','rp-to']) {
+  $(id).addEventListener('change', () => {
+    let a = Number($('rp-from').value), b = Number($('rp-to').value);
+    if (a > b) { if (id === 'rp-from') b = a; else a = b; }
+    updateReading({ fromSurah: a, toSurah: b });
+  });
+}
+$('rp-stepper').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-d]');
+  if (!b) return;
+  const base = state.reading || DEFAULT_READING;
+  const v = clamp(base.pagesPerDay + Number(b.dataset.d), 1, 60);
+  if (v === base.pagesPerDay) return;
+  buzz(6);
+  updateReading({ pagesPerDay: v });
+});
 
 let commitT;
 async function commitPlan() {
@@ -538,49 +743,118 @@ function streak() {
   return n;
 }
 
-function renderProgress() {
-  const WEEKS = 8, today = new Date(), todayK = dateKey(today);
-  const end = addDays(today, 7 - isoDay(today));
-  const start = addDays(end, -(WEEKS*7 - 1));
+function renderCalendar() {
+  if (!state.calMonth) { const n = new Date(); state.calMonth = new Date(n.getFullYear(), n.getMonth(), 1); }
+  const month = state.calMonth;
+  const todayK = dateKey();
 
-  let html = '<div class="hm-labels">' +
-    DAY_INITIAL.map((d) => `<span class="hm-lbl">${d}</span>`).join('') + '</div>';
-  for (let w = 0; w < WEEKS; w++) {
-    html += '<div class="hm-col">';
-    for (let d = 0; d < 7; d++) {
-      const day = addDays(start, w*7 + d), k = dateKey(day);
-      const h = state.history[k];
-      let lv = 0;
-      if (h && h.total) { const f = h.done / h.total; lv = f === 0 ? 0 : f < .5 ? 1 : f < 1 ? 2 : 3; }
-      const label = day.toLocaleDateString(undefined,{day:'numeric',month:'short'});
-      html += `<button class="cell l${lv} ${k>todayK?'is-future':''}" type="button"
-                 data-k="${k}" data-day="${esc(label)}" data-n="${k>todayK?-1:(h?h.done:0)}"
-                 data-t="${h?h.total:0}" aria-label="${esc(label)}"></button>`;
+  $('cal-month').textContent =
+    month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  $('cal-dows').innerHTML = DAY_INITIAL.map((d) => `<span>${d}</span>`).join('');
+
+  const first = new Date(month.getFullYear(), month.getMonth(), 1);
+  const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+  const lead = isoDay(first) - 1;          // Monday-first grid
+
+  let html = '';
+  for (let i = 0; i < lead; i++) html += '<span class="cal-pad"></span>';
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const date = new Date(month.getFullYear(), month.getMonth(), d);
+    const k = dateKey(date);
+    const h = state.history[k];
+    const future = k > todayK;
+
+    // Turning up at all is never red. Red is only a day that had work and
+    // none of it was done.
+    let cls = 'd-empty';
+    if (h && h.total) {
+      if (h.done === h.total) cls = 'd-full';
+      else if (h.done > 0) cls = 'd-part';
+      else if (!future) cls = 'd-none';
     }
-    html += '</div>';
-  }
-  $('heatmap').innerHTML = html;
+    const lesson = (state.config.lessonDays || []).includes(isoDay(date));
+    const hasNote = reflectionsOn(k).length > 0;
 
-  let done = 0, tracked = 0;
-  for (let i = 0; i < WEEKS*7; i++) {
-    const h = state.history[dateKey(addDays(today, -i))];
-    if (h && h.total) { tracked++; if (h.done === h.total) done++; }
+    html += `<button class="cal-day ${cls}${future ? ' is-future' : ''}` +
+            `${lesson ? ' is-lesson' : ''}${k === todayK ? ' is-today' : ''}"` +
+            ` type="button" data-k="${k}" aria-label="${esc(k)}">` +
+            `<span class="cal-n">${d}</span>` +
+            (hasNote ? '<span class="cal-note-dot"></span>' : '') +
+            `</button>`;
+  }
+  $('cal-grid').innerHTML = html;
+
+  // Turning up, not perfection: a day counts if anything at all was done.
+  let turnedUp = 0, tracked = 0;
+  for (let i = 0; i < 56; i++) {
+    const h = state.history[dateKey(addDays(new Date(), -i))];
+    if (h && h.total) { tracked++; if (h.done > 0) turnedUp++; }
   }
   $('s-streak').textContent = streak();
-  $('s-rate').textContent = tracked ? Math.round(done/tracked*100) + '%' : '0%';
+  $('s-rate').textContent = tracked ? Math.round(turnedUp / tracked * 100) + '%' : '0%';
 
   if (!$('rv-date').value) $('rv-date').value = dateKey();
   renderChart();
   renderReviews();
 }
 
-$('heatmap').addEventListener('click', (e) => {
-  const c = e.target.closest('[data-day]');
-  if (!c) return;
-  const n = Number(c.dataset.n), t = Number(c.dataset.t);
-  toast(n < 0 ? `${c.dataset.day} — not yet`
-      : t === 0 ? `${c.dataset.day} — nothing scheduled`
-      : `${c.dataset.day} — ${n} of ${t} done`);
+$('cal-prev').addEventListener('click', () => {
+  state.calMonth = new Date(state.calMonth.getFullYear(), state.calMonth.getMonth() - 1, 1);
+  renderCalendar();
+});
+$('cal-next').addEventListener('click', () => {
+  state.calMonth = new Date(state.calMonth.getFullYear(), state.calMonth.getMonth() + 1, 1);
+  renderCalendar();
+});
+
+// Tapping a day shows everything that happened on it.
+$('cal-grid').addEventListener('click', async (e) => {
+  const cell = e.target.closest('[data-k]');
+  if (!cell) return;
+  const k = cell.dataset.k;
+  const date = parseKey(k);
+
+  $('day-title').textContent =
+    date.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
+
+  const { data } = await sb.from('daily_tasks').select('*')
+    .eq('task_date', k).eq('carried_away', false);
+  const tasks = (data || []).sort((a, b) => (ORDER[a.kind] ?? 9) - (ORDER[b.kind] ?? 9));
+  const notes = reflectionsOn(k);
+  const lesson = (state.config.lessonDays || []).includes(isoDay(date));
+
+  let body = '';
+  if (lesson) body += '<p class="day-lesson">Lesson day \u2014 you read to your teacher</p>';
+
+  if (!tasks.length && !notes.length) {
+    body += '<p class="day-empty">Nothing recorded for this day.</p>';
+  } else {
+    body += tasks.map((t) => {
+      const kd = kindOf(t.kind);
+      const n = (t.pages && t.pages.length) ? t.pages.length : 0;
+      return `<div class="day-row ${t.done ? 'is-done' : ''}">
+        <span class="day-tick">${t.done ? '\u2713' : '\u00b7'}</span>
+        <span><span class="day-kind">${kd.label}</span>
+        <span class="day-label">${esc(t.label)}</span>
+        ${n ? `<span class="day-pages">${n} page${n > 1 ? 's' : ''}</span>` : ''}</span>
+      </div>`;
+    }).join('');
+
+    body += notes.map((r) => `
+      <div class="day-reflection">
+        <div class="day-kind">Reflection</div>
+        <div class="day-ref">${esc(refLabel(r))}</div>
+        ${r.note ? `<div class="day-note">${esc(r.note)}</div>` : ''}
+      </div>`).join('');
+  }
+
+  $('day-body').innerHTML = body;
+  $('day-sheet').hidden = false;
+});
+$('day-close').addEventListener('click', () => { $('day-sheet').hidden = true; });
+$('day-sheet').addEventListener('click', (e) => {
+  if (e.target.id === 'day-sheet') $('day-sheet').hidden = true;
 });
 
 function parsePages(s) {
@@ -684,7 +958,7 @@ $('review-form').addEventListener('submit', (e) => {
   enqueue({ id: `review:${row.review_date}`, type: 'upsert', table: 'weekly_review',
             row, onConflict: 'user_id,review_date' });
   for (const id of ['rv-zero','rv-weak','rv-note']) $(id).value = '';
-  renderProgress();
+  renderCalendar();
   toast('Review saved');
 });
 
@@ -902,7 +1176,7 @@ $('signout').addEventListener('click', async () => { await sb.auth.signOut(); lo
 const VIEWS = {
   today:    { label: 'Today',    icon: ICONS.today,    render: renderToday },
   plan:     { label: 'Plan',     icon: ICONS.plan,     render: renderPlan },
-  progress: { label: 'Progress', icon: ICONS.progress, render: renderProgress },
+  calendar: { label: 'Calendar', icon: ICONS.progress, render: renderCalendar },
   more:     { label: 'More',     icon: ICONS.more,     render: renderMore }
 };
 $('tabs').innerHTML = Object.entries(VIEWS).map(([k, v]) =>

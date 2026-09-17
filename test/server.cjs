@@ -20,7 +20,8 @@ let ANON_ENABLED = true;
 let lastCode = null, lastEmail = null;
 function reset(seeded) {
   db = { plan_config: [], progress: [], daily_tasks: [], weekly_review: [],
-         settings: [], inspirations: INSPIRATIONS.slice() };
+         settings: [], reading_plan: [], reflections: [],
+         inspirations: INSPIRATIONS.slice() };
   session = null;
   if (seeded) {
     db.plan_config.push({ user_id: UID, direction: 'backward', lesson_days: [1,5],
@@ -35,6 +36,7 @@ reset(false);
 
 const KEYS = {
   plan_config: ['user_id'], progress: ['user_id'], settings: ['user_id'],
+  reading_plan: ['user_id'], reflections: ['id'],
   weekly_review: ['user_id', 'review_date'], daily_tasks: ['id']
 };
 const TYPES = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css',
@@ -112,9 +114,10 @@ const server = http.createServer(async (req, res) => {
       const keys = KEYS[b.table];
       const rows = db[b.table];
       const i = rows.findIndex((r) => keys.every((k) => String(r[k]) === String(b.row[k])));
-      if (i >= 0) rows[i] = { ...rows[i], ...b.row };
-      else rows.push({ id: 'row-' + (idSeq++), ...b.row });
-      return send(res, 200, { rows: [b.row] });
+      let stored;
+      if (i >= 0) { rows[i] = { ...rows[i], ...b.row }; stored = rows[i]; }
+      else { stored = { id: 'row-' + (idSeq++), ...b.row }; rows.push(stored); }
+      return send(res, 200, { rows: [stored] });
     }
     return send(res, 404, {});
   }

@@ -209,14 +209,130 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
      !db.daily_tasks.some((t) => t.kind === 'new' && t.carried_from === back(1)));
   ok('today shows it as carried', await page.locator('.task.is-carried').first().isVisible());
 
-  await page.click('[data-view="progress"]');
-  await page.waitForSelector('#view-progress:not([hidden])');
-  const cell = page.locator(`#heatmap .cell[data-k="${back(1)}"]`);
-  ok('yesterday records both portions', (await cell.getAttribute('data-t')) === '2',
-     await cell.getAttribute('data-t'));
-  ok('and only the one that was done', (await cell.getAttribute('data-n')) === '1');
-  ok('so a missed day is not shaded complete',
-     !(await cell.getAttribute('class')).includes('l3'));
+  await page.click('[data-view="calendar"]');
+  await page.waitForSelector('#view-calendar:not([hidden])');
+  // Yesterday could be in the previous month at a boundary.
+  let cell = page.locator(`#cal-grid [data-k="${back(1)}"]`);
+  if (!(await cell.count())) { await page.click('#cal-prev'); await page.waitForTimeout(200);
+    cell = page.locator(`#cal-grid [data-k="${back(1)}"]`); }
+  const yCls = await cell.getAttribute('class');
+  ok('yesterday shows as partly done, not complete',
+     yCls.includes('d-part') && !yCls.includes('d-full'), yCls);
+
+  // Your rule: turning up at all is never red.
+  ok('and not as missed either, because something was done',
+     !yCls.includes('d-none'), yCls);
+
+  /* ─────────── 7b. the calendar ─────────── */
+  console.log('\n[7b] Calendar');
+  const todayCell = page.locator(`#cal-grid [data-k="${key()}"]`);
+  if (!(await todayCell.count())) { await page.click('#cal-next'); await page.waitForTimeout(200); }
+  ok('the month is named', (await page.textContent('#cal-month')).length > 6,
+     await page.textContent('#cal-month'));
+  ok('today is marked',
+     (await page.locator(`#cal-grid [data-k="${key()}"]`).getAttribute('class')).includes('is-today'));
+  const dayCount = await page.locator('#cal-grid .cal-day').count();
+  ok('a full month of days is shown', dayCount >= 28 && dayCount <= 31, String(dayCount));
+  ok('lesson days are marked',
+     (await page.locator('#cal-grid .cal-day.is-lesson').count()) >= 4,
+     String(await page.locator('#cal-grid .cal-day.is-lesson').count()));
+
+  const monthNow = await page.textContent('#cal-month');
+  await page.click('#cal-prev');
+  await page.waitForTimeout(250);
+  ok('you can page back a month', (await page.textContent('#cal-month')) !== monthNow);
+  await page.click('#cal-next');
+  await page.waitForTimeout(250);
+  ok('and forward again', (await page.textContent('#cal-month')) === monthNow);
+
+  await page.click(`#cal-grid [data-k="${key()}"]`);
+  await page.waitForSelector('#day-sheet:not([hidden])');
+  const dayTxt = await page.textContent('#day-body');
+  ok('tapping a day shows what happened on it', dayTxt.length > 10, dayTxt.slice(0, 120));
+  ok('including the portions', /Revision|New page/.test(dayTxt), dayTxt.slice(0, 120));
+  await page.click('#day-close');
+  await page.waitForTimeout(250);
+  ok('and closes', await page.locator('#day-sheet').isHidden());
+
+  /* ─────────── 7c. reflection ─────────── */
+  console.log('\n[7c] Reflection');
+  await page.click('[data-view="today"]');
+  await page.waitForTimeout(250);
+  ok('a reflection card is offered', await page.isVisible('#reflect-card'));
+  ok('and is not presented as a chore to tick',
+     (await page.locator('#reflect-card .tick').count()) === 0);
+
+  await page.click('#reflect-card');
+  await page.waitForSelector('#reflect-sheet:not([hidden])');
+  await page.selectOption('#rf-surah', '108');           // Al-Kawthar, 3 ayat
+  await page.fill('#rf-from', '9');                      // impossible
+  await page.waitForTimeout(200);
+  ok('an impossible ayah is corrected to the surah length',
+     (await page.inputValue('#rf-from')) === '3', await page.inputValue('#rf-from'));
+  ok('and the reference reads back correctly',
+     (await page.textContent('#rf-ref')).includes('Al-Kawthar 3'),
+     await page.textContent('#rf-ref'));
+  ok('with the ayah count stated', (await page.textContent('#rf-ref')).includes('3 ayat'));
+
+  await page.selectOption('#rf-surah', '2');
+  await page.fill('#rf-from', '255');
+  await page.fill('#rf-note', 'His seat extends over the heavens and the earth.');
+  await page.click('#rf-save');
+  await page.waitForTimeout(600);
+  ok('saving closes the sheet', await page.locator('#reflect-sheet').isHidden());
+  const cardTxt = await page.textContent('#reflect-card');
+  ok('the card now shows the verse', cardTxt.includes('Al-Baqarah 255'), cardTxt);
+  ok('and the note', cardTxt.includes('His seat extends'), cardTxt);
+  db = await api('dump');
+  ok('it is stored as numbers, needing no Qur\u2019an text',
+     db.reflections.length === 1 && db.reflections[0].surah === 2 &&
+     db.reflections[0].ayah_from === 255,
+     JSON.stringify(db.reflections[0]));
+
+  await page.click('[data-view="calendar"]');
+  await page.waitForTimeout(300);
+  ok('the calendar marks the day that has a reflection',
+     (await page.locator(`#cal-grid [data-k="${key()}"] .cal-note-dot`).count()) === 1);
+  await page.click(`#cal-grid [data-k="${key()}"]`);
+  await page.waitForSelector('#day-sheet:not([hidden])');
+  ok('and the day detail shows the note back',
+     (await page.textContent('#day-body')).includes('His seat extends'));
+  await page.click('#day-close');
+
+  /* ─────────── 7d. reading ─────────── */
+  console.log('\n[7d] Reading');
+  await page.click('[data-view="plan"]');
+  await page.waitForTimeout(250);
+  ok('reading is off by default', !(await page.isChecked('#p-reading-on')));
+  await page.check('#p-reading-on');
+  await page.waitForTimeout(900);
+  ok('turning it on reveals the range', await page.isVisible('#rp-from'));
+  const finish = await page.textContent('#rp-finish');
+  ok('it says how much is left and when it finishes',
+     /pages left/.test(finish) && /finishes/.test(finish), finish);
+  ok('the whole mushaf at 4 a day is 604 pages',
+     finish.includes('604'), finish);
+
+  // Juz Amma only, faster.
+  await page.selectOption('#rp-from', '78');
+  await page.waitForTimeout(900);
+  const finish2 = await page.textContent('#rp-finish');
+  ok('narrowing the range shortens it', finish2.includes('23'), finish2);
+  db = await api('dump');
+  ok('the plan is saved', db.reading_plan[0] && db.reading_plan[0].from_surah === 78,
+     JSON.stringify(db.reading_plan[0]));
+  ok('with its own cursor inside the new range',
+     db.reading_plan[0].cursor >= 582, String(db.reading_plan[0].cursor));
+
+  await page.click('[data-view="today"]');
+  await page.waitForTimeout(400);
+  const withReading = await page.textContent('#tasks');
+  ok('a reading portion appears on Today', withReading.includes('Reading'), withReading.slice(0, 300));
+  db = await api('dump');
+  const rd = db.daily_tasks.find((t) => t.task_date === key() && t.kind === 'reading');
+  ok('of the right size', rd && rd.pages.length === 4, rd && String(rd.pages.length));
+  ok('and separate from revision',
+     db.daily_tasks.filter((t) => t.task_date === key() && t.kind === 'revision').length >= 1);
 
   /* ─────────── 8. reminders ─────────── */
   console.log('\n[8] Reminders');
@@ -279,7 +395,7 @@ const isoDay = () => (new Date().getDay() === 0 ? 7 : new Date().getDay());
   const tb = await page.locator('.task').first().boundingBox();
   ok('task tap target >= 60px', tb.height >= 60, String(tb.height));
 
-  for (const v of ['today','plan','progress','more']) {
+  for (const v of ['today','plan','calendar','more']) {
     await page.click(`[data-view="${v}"]`);
     await page.waitForTimeout(260);
     await page.screenshot({ path: `${__dirname}/shot-${v}.png` });

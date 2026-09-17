@@ -15,7 +15,7 @@
 // So mid-surah the pages you hold have a hole in them, and the state carries a
 // second range for the surah in progress.
 
-import { labelForPages, surahAtPage, LAST_PAGE } from './quran.js';
+import { labelForPages, surahAtPage, pagesForSurahRange, LAST_PAGE } from './quran.js';
 
 export const DEFAULT_CONFIG = {
   direction: 'backward',
@@ -123,12 +123,50 @@ export function activeSurah(state, config) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Reading
+ *
+ * Nothing to do with memorizing. You pick a stretch of the mushaf and a pace,
+ * and it hands you that many pages a day until the stretch is done, then
+ * begins again. A plan is { fromSurah, toSurah, pagesPerDay, cursor }.
+ * ------------------------------------------------------------------ */
+
+export function readingPool(plan) {
+  if (!plan) return [];
+  const { from, to } = pagesForSurahRange(plan.fromSurah, plan.toSurah);
+  const out = [];
+  for (let p = from; p <= to; p++) out.push(p);
+  return out;
+}
+
+export function readingPortion(plan) {
+  if (!plan || !plan.pagesPerDay) return null;
+  const run = takeRun(readingPool(plan), plan.cursor, plan.pagesPerDay);
+  if (!run) return null;
+  return { ...run, label: labelForRun(run.pages) };
+}
+
+// How many days until this pass through the range is finished, and on what
+// date - the question anyone setting a reading goal actually has.
+export function readingFinish(plan, from = new Date()) {
+  const pool = readingPool(plan);
+  if (!pool.length || !plan.pagesPerDay) return null;
+  let i = pool.indexOf(plan.cursor);
+  if (i < 0) i = 0;
+  const remaining = pool.length - i;
+  const days = Math.ceil(remaining / plan.pagesPerDay);
+  const date = new Date(from);
+  date.setDate(date.getDate() + days - 1);
+  return { days, date, remaining, total: pool.length };
+}
+
+/* ------------------------------------------------------------------ *
  * One day
  * ------------------------------------------------------------------ */
 
 // Pure: given the state at the start of a day, return that day's work and the
-// state to carry into the next. `state` is never mutated.
-export function planDay(state, config, isoWeekday) {
+// state to carry into the next. `state` is never mutated. `reading` is the
+// optional reading plan, which carries its own cursor.
+export function planDay(state, config, isoWeekday, reading = null) {
   const tasks = [];
   const next = { ...state };
 
@@ -147,6 +185,19 @@ export function planDay(state, config, isoWeekday) {
       tasks.push({ kind: 'revision', pages: run.pages, from: run.from, to: run.to,
                    label: labelForRun(run.pages), completesCycle: run.completesCycle });
       next.revisionCursor = run.nextCursor;
+    }
+  }
+
+  // Reading follows its own days and is unaffected by a Qur'an rest day, which
+  // is about revision load rather than about not opening the mushaf.
+  if (reading && reading.pagesPerDay > 0 &&
+      (reading.days || [1,2,3,4,5,6,7]).includes(isoWeekday)) {
+    const portion = readingPortion(reading);
+    if (portion) {
+      tasks.push({ kind: 'reading', pages: portion.pages, from: portion.from,
+                   to: portion.to, label: portion.label,
+                   completesCycle: portion.completesCycle });
+      next.readingCursor = portion.nextCursor;
     }
   }
 
@@ -229,13 +280,15 @@ export function cyclePosition(state, config) {
 
 // Dry-run the next n days without touching stored state, assuming each is
 // finished. Used by the planner to show the effect of a change.
-export function preview(state, config, startIsoWeekday, days) {
+export function preview(state, config, startIsoWeekday, days, reading = null) {
   let s = { ...state };
+  let r = reading ? { ...reading } : null;
   let wd = startIsoWeekday;
   const out = [];
   for (let i = 0; i < days; i++) {
-    const { tasks, next } = planDay(s, config, wd);
+    const { tasks, next } = planDay(s, config, wd, r);
     s = next;
+    if (r && next.readingCursor != null) r = { ...r, cursor: next.readingCursor };
     for (const t of tasks) if (t.kind === 'new') s = absorbNew(s, config, t.from, t.to);
     out.push({ dayOffset: i, isoWeekday: wd, tasks });
     wd = wd === 7 ? 1 : wd + 1;

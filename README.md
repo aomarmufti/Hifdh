@@ -47,7 +47,18 @@ Move the number, the answer moves. That is the whole model.
 |---|---|---|
 | **Revision** <sub>Murājaʿah</sub> | everything you hold, N pages a day, in order, round and round | every day |
 | **New page** <sub>Sabaq</sub> | the page you prepare for your teacher | lesson days only |
+| **Reading** <sub>Tilāwah</sub> | a stretch of the mushaf you are reading through, at your own pace | days you choose |
+| **Reflection** <sub>Tadabbur</sub> | a verse you sat with, and what you saw in it | whenever it happens |
 | **Arabic** | optional standing task with text you set | days you choose |
+
+Reading is nothing to do with memorising: pick a range and a pace and it tells
+you the daily portion and the date you finish, then begins again. It carries its
+own cursor, so it never disturbs the revision rotation.
+
+Reflection is deliberately not a chore to tick off. You write the verse and what
+struck you, and it is kept against the day. The reference is stored as numbers
+(surah, ayah), validated against the real ayah counts — so it needs no Qur'an
+text at all. Displaying the verse itself would, and that is a separate problem.
 
 There used to be two overlapping revision rotations here — the classical
 sabqi/manzil split. It was correct and nobody could understand it. One dial, one
@@ -126,8 +137,12 @@ fixed and sits on the Today tab.
 1. **Today** — the daily message, a ring showing pages remaining, and the day's
    portions. Ticking is optimistic: the UI moves first, the write follows.
 2. **Plan** — the dials above, the live cycle length, and the preview.
-3. **Progress** — an 8-week heatmap shaded by how much of each day you finished,
-   a retention chart, and the weekly review form.
+3. **Calendar** — a month at a time. Green when the day was finished, amber when
+   some of it was, clay only when a day had work and none of it was done —
+   turning up at all is never red. Lesson days carry a mark on their edge and a
+   day holding a reflection carries a dot. Tap any day for everything that
+   happened on it, the note included. Below it, the retention chart and the
+   weekly review form.
 4. **More** — reminder time and account.
 
 ## The daily message
@@ -197,12 +212,17 @@ one. It stays silent when the day is already finished.
 The time is saved **before** the permission prompt appears, so dismissing that
 prompt never loses the setting.
 
-## Page numbers
+## Qur'an reference data
 
-The standard 604-page Madani mushaf. `public/lib/quran.js` holds all 114 surahs
-with their starting pages; a surah's last page is where the next one begins,
-because surahs share pages. If your copy is paginated differently, that one
-table is the only thing to change.
+`public/lib/quran.js` holds two tables and nothing else.
+
+**Starting pages** for all 114 surahs, in the standard 604-page Madani mushaf. A
+surah's last page is where the next one begins, because surahs share pages. If
+your copy is paginated differently, this is the only thing to change.
+
+**Ayah counts** for all 114 surahs, totalling 6236 — the standard Kufan count,
+which is what makes the table checkable rather than merely plausible. It is used
+to keep a reflection's reference honest: you cannot reflect on Al-Kawthar 9.
 
 ## Tests
 
@@ -219,7 +239,7 @@ over, that un-ticking the page which closed a gap re-opens it, that Arabic
 follows its own days without touching the rotation cursors, and that planning
 never mutates its input.
 
-**End-to-end (69 assertions, `test/test.cjs`)** — headless Chromium at iPhone
+**End-to-end (98 assertions, `test/test.cjs`)** — headless Chromium at iPhone
 viewport driving the real UI. The database lives in the Node test process, not
 the browser, so the persistence test clears **all** cookies and browser storage,
 reloads, and asserts everything returns — the actual cross-device guarantee.
