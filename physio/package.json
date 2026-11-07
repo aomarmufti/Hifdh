@@ -1,0 +1,11 @@
+{
+  "name": "kine-physio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI physiotherapy coach: live camera form feedback, rep counting and progress tracking",
+  "scripts": {
+    "start": "python3 -m http.server 5173",
+    "test": "node --test test/*.test.js"
+  }
+}
