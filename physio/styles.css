@@ -287,9 +287,10 @@ a.card:hover .go { color: var(--primary); translate: 3px -50%; }
 .cam video, .cam .overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
 .cam video { object-fit: cover; transform: scaleX(-1); opacity: 0; transition: opacity .4s; }
 .cam.camera video { opacity: 1; }
-.cam.camera .overlay { transform: scaleX(-1); }
 .cam.sim .overlay { filter: drop-shadow(0 0 12px rgba(138, 180, 248, .35)); }
-.cam::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(to bottom, rgba(0,0,0,.35), transparent 22%, transparent 62%, rgba(0,0,0,.55)); }
+/* Light scrims only where text sits, so the live picture stays bright and true. */
+.cam::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(to bottom, rgba(0,0,0,.28), transparent 14%, transparent 78%, rgba(0,0,0,.38)); }
+.cam .overlay { z-index: 1; }
 
 .gate, .stage { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; padding: 20px; }
 .stage { background: rgba(8, 10, 14, .45); backdrop-filter: blur(6px); }

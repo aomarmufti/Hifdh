@@ -390,25 +390,23 @@ function sessionView(cond, idx, q) {
     cam.classList.add('on', source);
     geo = fitVideo();
     if (source === 'camera') {
-      showStage(`<div class="stage-card"><div class="spinner"></div><p>Starting the camera coach…</p></div>`);
+      // Show the live picture as soon as the camera opens; the pose model loads behind it.
+      showStage(`<div class="stage-card"><div class="spinner"></div><p>Opening the camera…</p></div>`);
       try {
-        const [stop, lmk] = await Promise.all([openCamera(video), loadPoseModel()]);
-        S.stop = stop; S.landmarker = lmk;
+        S.stop = await openCamera(video);
         geo = fitVideo();
       } catch (err) {
-        S.stop?.();
         const denied = err?.name === 'NotAllowedError';
-        showStage(`<div class="stage-card">
-          <div class="gate-icon warn">${icon('warn', 26)}</div>
-          <h2>${denied ? 'Camera access was blocked' : 'The camera coach couldn’t start'}</h2>
-          <p>${denied ? 'Allow camera access in your browser settings, or carry on by counting reps yourself.' : esc(err?.message ?? 'Please try again.')}</p>
-          <button class="btn primary block" id="toTap">${icon('tap', 18)} Count reps myself</button>
-        </div>`);
-        stage.querySelector('#toTap').onclick = () => { cam.classList.remove('camera'); begin('manual'); };
-        return;
+        return cameraProblem(denied ? 'Camera access was blocked' : 'The camera couldn’t start',
+          denied ? 'Allow camera access in your browser settings, or carry on by counting reps yourself.' : err?.message);
       }
       showStage('');
-      S.mode = 'waiting';
+      S.mode = 'loading';
+      setStatus('search', 'Loading the coach…');
+      loadPoseModel().then((lmk) => {
+        S.landmarker = lmk;
+        if (S.mode === 'loading') S.mode = 'waiting';
+      }).catch((err) => cameraProblem('The coach couldn’t load', `${err?.message ?? 'Check your connection and try again.'}`));
     } else if (source === 'sim') {
       S.mode = 'waiting';
     } else {
@@ -419,6 +417,23 @@ function sessionView(cond, idx, q) {
     }
     S.started = performance.now();
     loop();
+  }
+  function cameraProblem(title, detail) {
+    S.mode = 'gate';
+    showStage(`<div class="stage-card">
+      <div class="gate-icon warn">${icon('warn', 26)}</div>
+      <h2>${esc(title)}</h2>
+      <p>${esc(detail ?? 'Please try again.')}</p>
+      <button class="btn primary block" id="toTap">${icon('tap', 18)} Count reps myself</button>
+    </div>`);
+    stage.querySelector('#toTap').onclick = () => {
+      cancelAnimationFrame(S.raf);
+      S.stop?.(); S.stop = null;
+      cam.classList.remove('camera');
+      octx.clearRect(0, 0, geo.w, geo.h);
+      showStage('');
+      begin('manual');
+    };
   }
   $('useCam').onclick = () => begin('camera');
   $('useSim').onclick = () => begin('sim');
@@ -440,15 +455,13 @@ function sessionView(cond, idx, q) {
       lms = simLandmarks(now);
       aspect = geo.w / geo.h;
     }
-    if (S.source !== 'manual') {
-      const fit = S.source === 'sim' ? { sx: geo.w, sy: geo.h, dx: 0, dy: 0 } : geo.fit;
-      const accent = getComputedStyle(cam).getPropertyValue('--cam-accent').trim() || '#8ab4f8';
-      drawSkeleton(octx, lms, geo.w, geo.h, { color: 'rgba(255,255,255,.9)', accent, focus, fit });
-    }
+    // What to paint on the person this frame: filled in by the mode handling below.
+    const ov = { tone: 'move', side: null, label: null };
 
     if (S.mode === 'waiting') {
       const ok = coach.visible(lms, aspect);
       setStatus(ok ? 'ok' : 'search', ok ? 'In position' : 'Step into view');
+      ov.tone = ok ? 'good' : 'idle';
       showCue(ok ? { text: 'Hold still — starting…', tone: 'info' } : { text: ex.cameraTip, tone: 'info' });
       seenSince = ok ? seenSince || now : 0;
       if (ok && now - seenSince > 1200) startCountdown();
@@ -459,6 +472,9 @@ function sessionView(cond, idx, q) {
       if (st.value != null && st.tracking) $('read').textContent = st.display;
       showCue(st.cue);
       for (const ev of st.events) onEvent(ev);
+      ov.side = st.side;
+      ov.tone = !st.tracking ? 'idle' : st.cue?.tone === 'warn' ? 'warn' : st.progress >= 1 ? 'good' : 'move';
+      ov.label = st.tracking ? st.display : null;
       if (isHold) paintHold(coach.counter.held, st.inZone);
     } else if (S.mode === 'active' && S.source === 'manual' && isHold && S.holdStart) {
       const held = (now - S.holdStart) / 1000;
@@ -466,6 +482,18 @@ function sessionView(cond, idx, q) {
       paintMeter(Math.min(1, held / goal), true);
       if (held >= goal) { S.holdStart = 0; blip(1200); finishSet(); }
     }
+    paintOverlay(lms, ov);
+  }
+
+  function paintOverlay(lms, ov) {
+    if (S.source === 'manual') return;
+    const sim = S.source === 'sim';
+    drawSkeleton(octx, lms, geo.w, geo.h, {
+      fit: sim ? { sx: geo.w, sy: geo.h, dx: 0, dy: 0 } : geo.fit,
+      mirror: !sim,                        // selfie view, like a mirror
+      focus, side: ex.sides === 'none' ? null : ov.side,
+      arc: ex.arc, bend: ex.display?.fn?.(0) === 180, label: ov.label, tone: ov.tone,
+    });
   }
 
   function setStatus(kind, text) {
